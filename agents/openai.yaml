@@ -1,0 +1,4 @@
+interface:
+  display_name: "双向钢人论证"
+  short_description: "先双向钢人，再问一个关键问题"
+  default_prompt: "请对这个决策问题做双向钢人论证："

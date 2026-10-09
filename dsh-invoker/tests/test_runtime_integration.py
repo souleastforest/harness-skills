@@ -269,6 +269,43 @@ def loader_entry_failure_diagnostic(message: str) -> dict[str, str]:
     return loader_failure_fields(safe)
 
 
+# Pinned JSON-RPC error conversion serializes thrown runtime Error.message into
+# error.data.details while keeping the wire error.message generic ("Internal error").
+# Inspect only exact string fields; never serialize error.data itself.
+def _initialize_failure_candidates(error: Exception, message: Any) -> tuple[str, ...]:
+    """Read only known message fields from SDK JSON-RPC error shapes."""
+    candidates = []
+    if type(message) is str and len(message) <= 64 * 1024:
+        candidates.append(message)
+    data = vars(error).get("data")
+    if type(data) is dict:
+        for key in ("message", "details"):
+            candidate = data.get(key)
+            if type(candidate) is str and len(candidate) <= 64 * 1024:
+                candidates.append(candidate)
+        nested_error = data.get("error")
+        if type(nested_error) is dict:
+            candidate = nested_error.get("message")
+            if type(candidate) is str and len(candidate) <= 64 * 1024:
+                candidates.append(candidate)
+            nested_data = nested_error.get("data")
+            if type(nested_data) is dict:
+                for key in ("message", "details"):
+                    candidate = nested_data.get(key)
+                    if type(candidate) is str and len(candidate) <= 64 * 1024:
+                        candidates.append(candidate)
+    return tuple(candidates)
+
+
+def _classify_initialize_message(message: str) -> tuple[str, dict[str, str]]:
+    first_line = message.partition("\n")[0]
+    category = _INITIALIZE_FAILURE_CATEGORIES.get(first_line, "unknown")
+    loader = loader_entry_failure_diagnostic(message)
+    if loader:
+        return "loader-settlement", loader
+    return category, {}
+
+
 def fixture_failure_diagnostic(error: Exception, diagnostic: dict[str, Any]) -> dict[str, Any]:
     """Classify a native initialization failure without serializing any SDK text."""
     value: dict[str, Any] = {"fixture_failed": True, "failure_category": "unknown"}
@@ -284,14 +321,16 @@ def fixture_failure_diagnostic(error: Exception, diagnostic: dict[str, Any]) -> 
         if type(code) is int and code in RPC_ERROR_CODES:
             value["rpc_code"] = code
         message = fields.get("message")
-        if (type(code) is int and code == -32603 and stage in ("initialize", "harness-enter")
-                and type(message) is str and len(message) <= 64 * 1024):
-            # initialize() may append stderr after the wire message. Do not scan
-            # those later lines: a log mention is not evidence of the RPC cause.
-            value["failure_category"] = _INITIALIZE_FAILURE_CATEGORIES.get(message.partition("\n")[0], "unknown")
-            loader = loader_entry_failure_diagnostic(message)
-            if loader:
-                value.update(failure_category="loader-settlement", **loader)
+        if (type(code) is int and code == -32603 and stage in ("initialize", "harness-enter")):
+            # The API server's JSON-RPC wire envelope uses a generic message and
+            # carries the actual thrown error.message as error.data.message.
+            for candidate in _initialize_failure_candidates(error, message):
+                category, loader = _classify_initialize_message(candidate)
+                if category != "unknown":
+                    value["failure_category"] = category
+                    if loader:
+                        value.update(loader)
+                    break
     return value
 
 
@@ -301,7 +340,7 @@ def command_diagnostic(returncode: Any, timed_out: bool, stdout: bytes | str = b
     if type(returncode) is int and -(2**31) <= returncode < 2**32:
         value["returncode"] = returncode
     for raw, channel in ((stdout, "helper"), (stderr, "fixture")):
-        if len(raw) > 64 * 1024:
+        if not isinstance(raw, (bytes, str)) or len(raw) > 64 * 1024:
             continue
         try:
             envelope = json.loads(raw)
@@ -669,11 +708,15 @@ def run_owned(
             # Keep only reconstructed fields before cleanup, so a cleanup
             # assertion cannot erase the command's safe exit/stage evidence.
             if diagnostic is not None:
-                diagnostic.update(process_stage="cleanup", **command_diagnostic(process.returncode, False, stdout, stderr))
+                diagnostic.update(process_stage="cleanup", **command_diagnostic(
+                    process.returncode, False, stdout, stderr,
+                ))
             observed = job.cleanup(timed_out=False) if job is not None else tree.cleanup(timed_out=False)  # type: ignore[union-attr]
             cleaned = True
         if diagnostic is not None:
-            diagnostic.update(process_stage="complete", **command_diagnostic(process.returncode, timed_out, stdout, stderr))
+            diagnostic.update(process_stage="complete", **command_diagnostic(
+                process.returncode, timed_out, stdout, stderr,
+            ))
         return OwnedResult(
             process.returncode, stdout.decode("utf-8", errors="replace"),
             stderr.decode("utf-8", errors="replace"), timed_out, observed,

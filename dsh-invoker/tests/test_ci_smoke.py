@@ -21,6 +21,14 @@ SPEC.loader.exec_module(ci)
 SECRET = "sk-fake-ci-private-request-payload-never-print"
 
 
+def installed_json_rpc_error_type():
+    try:
+        from deepseek_harness.errors import JsonRpcError
+    except ImportError as error:
+        raise unittest.SkipTest("published deepseek-harness SDK is unavailable") from error
+    return JsonRpcError
+
+
 class CiSmokeTests(unittest.TestCase):
     def setUp(self):
         configured = os.environ.get("DSH_INVOKER_TEST_TMP") or os.environ.get("DSH_INVOKER_TEST_ROOT")
@@ -262,8 +270,8 @@ class CiSmokeTests(unittest.TestCase):
 
     def test_native_initialize_categories_withhold_private_sdk_details(self):
         # No SDK import/process/provider request: simulate the installed error's
-        # public fields, including the private data/stderr initialize can append.
-        error_type = type("JsonRpcError", (RuntimeError,), {})
+        # public fields: generic wire message plus source-defined error.data.details.
+        JsonRpcError = installed_json_rpc_error_type()
         signatures = (
             ("loader fibers failed", "loader-settlement"),
             ("initialize reasoningEffort must be a non-empty string", "initialize-parameters"),
@@ -275,17 +283,14 @@ class CiSmokeTests(unittest.TestCase):
         for stage in ("initialize", "harness-enter"):
             for message, category in signatures:
                 with self.subTest(stage=stage, category=category):
-                    error = error_type(SECRET)
-                    error.code = -32603
-                    error.message = message + "\n" + SECRET
-                    error.data = {"private": SECRET, "path": SECRET}
+                    error = JsonRpcError(-32603, "Internal error", {"details": message + "\n" + SECRET, "private": SECRET, "path": SECRET})
                     envelope = ci._support.fixture_failure_diagnostic(error, {"fixture_stage": stage, "private": SECRET})
                     self.assertEqual(envelope, {
                         "fixture_failed": True, "error_type": "JsonRpcError", "fixture_stage": stage,
                         "failure_category": category, "rpc_code": -32603,
                     })
                     self.assertNotIn(SECRET, json.dumps(envelope))
-                    result = self.owned_result("", json.dumps({**envelope, "message": SECRET, "data": error.data}), returncode=1)
+                    result = self.owned_result("", json.dumps(envelope), returncode=1)
                     def command_failure(case):
                         case.assert_owned_success(result, stage="lifecycle")
 
@@ -303,7 +308,7 @@ class CiSmokeTests(unittest.TestCase):
                         self.assertNotIn('"' + field + '"', public)
 
     def test_native_initialize_unknowns_do_not_imply_a_failure_cause(self):
-        error_type = type("JsonRpcError", (RuntimeError,), {})
+        JsonRpcError = installed_json_rpc_error_type()
         for code, stage, message in (
             (-32603, "initialize", SECRET),
             (-32603, "initialize", SECRET + "\nloader fibers failed"),
@@ -318,8 +323,7 @@ class CiSmokeTests(unittest.TestCase):
             (-32603, "initialize", 'adapter returned invalid context metadata for provider "deepseek-official" model "' + SECRET + '"'),
         ):
             with self.subTest(code=code, stage=stage, kind=type(message).__name__):
-                error = error_type(SECRET)
-                error.code, error.message, error.data = code, message, {"private": SECRET}
+                error = JsonRpcError(code, "Internal error", {"message": message, "private": SECRET})
                 envelope = ci._support.fixture_failure_diagnostic(error, {"fixture_stage": stage})
                 self.assertEqual(envelope["failure_category"], "unknown")
                 self.assertEqual(envelope["rpc_code"], code)
@@ -333,11 +337,10 @@ class CiSmokeTests(unittest.TestCase):
         self.assertNotIn(SECRET, json.dumps(envelope))
 
     def test_native_rpc_codes_and_categories_are_strictly_allowlisted(self):
-        error_type = type("JsonRpcError", (RuntimeError,), {})
+        JsonRpcError = installed_json_rpc_error_type()
         for code in (-32601, -32603, -32700, -32602, 5, True, -2**31 - 1, 2**32, SECRET, [], {}):
             with self.subTest(kind=type(code).__name__):
-                error = error_type(SECRET)
-                error.code, error.message = code, "loader fibers failed"
+                error = JsonRpcError(code, "loader fibers failed", {"private": SECRET})
                 envelope = ci._support.fixture_failure_diagnostic(error, {"fixture_stage": "initialize"})
                 allowed = type(code) is int and code in ci._support.RPC_ERROR_CODES
                 self.assertEqual("rpc_code" in envelope, allowed)
@@ -346,7 +349,12 @@ class CiSmokeTests(unittest.TestCase):
                 else:
                     self.assertEqual(envelope["failure_category"], "unknown")
                 self.assertNotIn(SECRET, json.dumps(envelope))
+        JsonRpcError = installed_json_rpc_error_type()
         for code in (-32601, -32603):
+            error = JsonRpcError(code, "Internal error", {"message": SECRET, "private": SECRET})
+            envelope = ci._support.fixture_failure_diagnostic(error, {"fixture_stage": "initialize"})
+            self.assertEqual(envelope.get("failure_category"), "unknown")
+            self.assertNotIn(SECRET, json.dumps(envelope))
             for category in ci._support.FIXTURE_FAILURE_CATEGORIES:
                 envelope = {"fixture_failed": True, "rpc_code": code, "failure_category": category, "private": SECRET}
                 self.assertEqual(ci._support.command_diagnostic(1, False, "", json.dumps(envelope)), {
@@ -359,7 +367,7 @@ class CiSmokeTests(unittest.TestCase):
             })
 
     def test_loader_wrapper_fixed_families_and_variable_paths_are_safe(self):
-        error_type = type("JsonRpcError", (RuntimeError,), {})
+        JsonRpcError = installed_json_rpc_error_type()
         module = "@deepseek-ai/dsh-subprocess-local"
         signatures = [
             (signature, "native-addon", token)
@@ -379,15 +387,11 @@ class CiSmokeTests(unittest.TestCase):
         for loader_stage in ci._support.LOADER_FAILURE_STAGES:
             for cause, family, token in signatures:
                 with self.subTest(loader_stage=loader_stage, family=family, token=token):
-                    error = error_type(SECRET)
-                    error.code = -32603
-                    error.message = "failed to " + loader_stage + " loader entry arbitrary.secret-entry:17 (" + module + "): " + cause
-                    # SDK initialize() appends raw stderr after the wire message;
-                    # no later-line signature or data may change this classification.
-                    error.message += "\nstderr tail:\n" + SECRET + "\nloader fibers failed"
-                    if family == "native-addon" and token != "MODULE_DID_NOT_SELF_REGISTER":
-                        error.message = error.message.replace("\nstderr tail:", "\r\nstderr tail:", 1)
-                    error.data = {"private": SECRET}
+                    error = JsonRpcError(-32603, "Internal error", {
+                        "details": "failed to " + loader_stage + " loader entry arbitrary.secret-entry:17 (" + module + "): " + cause
+                                   + "\nstderr tail:\n" + SECRET + "\nloader fibers failed",
+                        "private": SECRET,
+                    })
                     envelope = ci._support.fixture_failure_diagnostic(error, {"fixture_stage": "initialize"})
                     self.assertEqual(envelope, {
                         "fixture_failed": True, "error_type": "JsonRpcError", "fixture_stage": "initialize",
@@ -410,7 +414,7 @@ class CiSmokeTests(unittest.TestCase):
                     self.assertNotIn("arbitrary.secret-entry", public)
 
     def test_loader_wrapper_rejects_malformed_modules_and_multiline_spoofs(self):
-        error_type = type("JsonRpcError", (RuntimeError,), {})
+        JsonRpcError = installed_json_rpc_error_type()
         prefix = "failed to apply loader entry private-entry (@deepseek-ai/dsh-subprocess-local): "
         for message in (
             SECRET + "\n" + prefix + "spawn pwsh ENOENT",
@@ -427,8 +431,7 @@ class CiSmokeTests(unittest.TestCase):
             prefix + "x" * ci.MAX_DIAGNOSTIC,
         ):
             with self.subTest(kind=len(message)):
-                error = error_type(SECRET)
-                error.code, error.message, error.data = -32603, message, {"private": SECRET}
+                error = JsonRpcError(-32603, message, {"private": SECRET})
                 envelope = ci._support.fixture_failure_diagnostic(error, {"fixture_stage": "harness-enter"})
                 self.assertEqual(envelope, {
                     "fixture_failed": True, "error_type": "JsonRpcError", "fixture_stage": "harness-enter",
@@ -443,16 +446,14 @@ class CiSmokeTests(unittest.TestCase):
             "The specified module could not be found. " + SECRET,
             "ENOENT: no such file or directory, open 'C:/" + SECRET + "' " + SECRET,
         ):
-            error = error_type(SECRET)
-            error.code, error.message = -32603, prefix + cause + "\nThe specified module could not be found."
+            error = JsonRpcError(-32603, prefix + cause + "\nThe specified module could not be found.", {"private": SECRET})
             envelope = ci._support.fixture_failure_diagnostic(error, {"fixture_stage": "initialize"})
             self.assertEqual(envelope["failure_category"], "loader-settlement")
             self.assertEqual(envelope["loader_cause"], "unknown")
             self.assertNotIn("loader_token", envelope)
             self.assertNotIn(SECRET, json.dumps(envelope))
         for stage, code in (("restore-request", -32603), ("initialize", -32601)):
-            error = error_type(SECRET)
-            error.code, error.message = code, prefix + "spawn pwsh ENOENT"
+            error = JsonRpcError(code, prefix + "spawn pwsh ENOENT", {"private": SECRET})
             envelope = ci._support.fixture_failure_diagnostic(error, {"fixture_stage": stage})
             self.assertEqual(envelope["failure_category"], "unknown")
             self.assertFalse(set(ci._support.LOADER_DIAGNOSTIC_FIELDS) & envelope.keys())

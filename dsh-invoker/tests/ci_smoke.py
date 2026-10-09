@@ -51,6 +51,9 @@ BOOTSTRAP_ERROR_CODES = frozenset((
     "uv_archive", "uv_capability", "uv_digest", "uv_download", "uv_version", "venv_create",
 ))
 
+# Native fields are validated against literal/source-derived values after loading
+# the checked-in fixture below; native child envelopes are not trusted wholesale.
+
 # Import our test infrastructure, not another SDK/protocol implementation.
 _spec = importlib.util.spec_from_file_location("dsh_ci_native_test_support", TESTS / "test_runtime_integration.py")
 if _spec is None or _spec.loader is None:
@@ -58,6 +61,24 @@ if _spec is None or _spec.loader is None:
 _support = importlib.util.module_from_spec(_spec)
 sys.modules[_spec.name] = _support
 _spec.loader.exec_module(_support)
+NATIVE_STAGES = _support.COMMAND_STAGES
+NATIVE_EXCEPTIONS = _support.EXCEPTION_TYPES
+NATIVE_HELPER_ERRORS = _support.HELPER_ERROR_CODES
+
+
+def native_source_sites() -> frozenset[tuple[str, int]]:
+    """Only executable function/line pairs from checked-in fixture source."""
+    code = compile((TESTS / "test_runtime_integration.py").read_text(encoding="utf-8"), str(TESTS / "test_runtime_integration.py"), "exec")
+    def sites(function: Any) -> set[tuple[str, int]]:
+        result = {(function.co_name, line) for _start, _end, line in function.co_lines() if line is not None}
+        for constant in function.co_consts:
+            if isinstance(constant, type(code)):
+                result.update(sites(constant))
+        return result
+    return frozenset(sites(code))
+
+
+NATIVE_SOURCE_SITES = native_source_sites()
 
 
 class VerificationError(RuntimeError):
@@ -104,6 +125,34 @@ def lane_succeeded(lane: str, counts: dict[str, int]) -> bool:
     )
 
 
+def native_failure_diagnostic(value: Any, allowed: frozenset[str]) -> dict[str, Any] | None:
+    """Reconstruct fixed source codes only; reject unknown diagnostic values."""
+    if type(value) is not dict or not valid_test_id(value.get("test_id"), allowed):
+        return None
+    if (type(value.get("exception")) is not str or value["exception"] not in NATIVE_EXCEPTIONS
+            or type(value.get("site")) is not str or type(value.get("line")) is not int
+            or (value["site"], value["line"]) not in NATIVE_SOURCE_SITES):
+        return None
+    safe = {key: value[key] for key in ("test_id", "exception", "site", "line")}
+    for field, codes in (("stage", NATIVE_STAGES), ("process_stage", _support.PROCESS_STAGES),
+                         ("fixture_stage", _support.FIXTURE_STAGES), ("helper_error", NATIVE_HELPER_ERRORS),
+                         ("child_exception", NATIVE_EXCEPTIONS)):
+        if field in value:
+            if type(value[field]) is not str or value[field] not in codes:
+                return None
+            safe[field] = value[field]
+    if "returncode" in value:
+        code = value["returncode"]
+        if type(code) is not int or not -(2**31) <= code < 2**32:
+            return None
+        safe["returncode"] = code
+    if "timed_out" in value:
+        if type(value["timed_out"]) is not bool:
+            return None
+        safe["timed_out"] = value["timed_out"]
+    return safe
+
+
 class SafeTestResult(unittest.TestResult):
     """Count outcomes without retaining exceptions, tracebacks or skip reasons."""
 
@@ -113,6 +162,28 @@ class SafeTestResult(unittest.TestResult):
         self.allowed = allowed
         self.counts = dict.fromkeys(COUNT_KEYS, 0)
         self.failed_test_ids: set[str] = set()
+        self.native_failures: list[dict[str, Any]] = []
+
+    def record_native_failure(self, test: Any, err: Any) -> None:
+        if self.lane != "native":
+            return
+        site, line = None, None
+        trace = err[2]
+        while trace is not None:
+            code = trace.tb_frame.f_code
+            if code.co_filename == str(TESTS / "test_runtime_integration.py") and (code.co_name, trace.tb_lineno) in NATIVE_SOURCE_SITES:
+                site, line = code.co_name, trace.tb_lineno
+            trace = trace.tb_next
+        value = {"test_id": test.id(), "exception": err[0].__name__, "site": site, "line": line}
+        for command in (vars(test).get("ci_diagnostic"), vars(err[1]).get("ci_diagnostic")):
+            if type(command) is dict:
+                # Reconstruct known keys only; never preserve raw attributes.
+                value.update({key: command[key] for key in (
+                    "stage", "process_stage", "returncode", "timed_out", "helper_error", "child_exception", "fixture_stage",
+                ) if key in command})
+        safe = native_failure_diagnostic(value, self.allowed)
+        if safe is not None and safe not in self.native_failures and len(self.native_failures) < len(self.allowed):
+            self.native_failures.append(safe)
 
     def record(self, outcome: str, test: Any) -> None:
         self.counts[outcome] += 1
@@ -122,14 +193,17 @@ class SafeTestResult(unittest.TestResult):
 
     def addFailure(self, test: Any, err: Any) -> None:
         self.record("failures", test)
+        self.record_native_failure(test, err)
 
     def addError(self, test: Any, err: Any) -> None:
         self.record("errors", test)
+        self.record_native_failure(test, err)
 
     def addSubTest(self, test: Any, subtest: Any, err: Any) -> None:
         if err is not None:
             # The parent ID is source-defined; subtest IDs may embed HTTP data.
             self.record("failures" if issubclass(err[0], test.failureException) else "errors", test)
+            self.record_native_failure(test, err)
 
     def addSkip(self, test: Any, reason: Any) -> None:
         if self.lane == "native":
@@ -147,10 +221,13 @@ class SafeTestResult(unittest.TestResult):
         return lane_succeeded(self.lane, {**self.counts, "tests": self.testsRun})
 
     def diagnostic(self) -> dict[str, Any]:
-        return {
+        value = {
             "schema_version": 1, "kind": "unittest", "lane": self.lane, "ok": self.wasSuccessful(),
             "counts": {**self.counts, "tests": self.testsRun}, "failed_test_ids": sorted(self.failed_test_ids),
         }
+        if self.native_failures:
+            value["native_failures"] = self.native_failures
+        return value
 
 
 def run_suite(suite: unittest.TestSuite, lane: str) -> dict[str, Any]:
@@ -189,10 +266,19 @@ def unittest_diagnostic(text: str, lane: str) -> dict[str, Any] | None:
     ok = lane_succeeded(lane, counts)
     if value.get("ok") is not ok:
         return None
-    return {
+    safe = {
         "schema_version": 1, "kind": "unittest", "lane": lane, "ok": ok,
         "counts": counts, "failed_test_ids": sorted(set(identifiers)),
     }
+    if "native_failures" in value:
+        details = value["native_failures"]
+        if lane != "native" or type(details) is not list or len(details) > len(allowed):
+            return None
+        validated = [native_failure_diagnostic(detail, allowed) for detail in details]
+        if any(detail is None or detail["test_id"] not in identifiers for detail in validated):
+            return None
+        safe["native_failures"] = validated
+    return safe
 
 
 def bootstrap_diagnostic(stdout: str, stderr: str, action: str) -> dict[str, Any] | None:

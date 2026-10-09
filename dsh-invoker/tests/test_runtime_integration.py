@@ -46,6 +46,56 @@ FIRST_RESPONSE = "DSH_CI_FIRST_ASSISTANT_HISTORY_359"
 FOLLOWUP_RESPONSE = "DSH_CI_SECOND_ASSISTANT_HISTORY_126"
 SHELL_TEXT = "DSH_CI_PERSISTENT_SHELL_OK"
 SHELL_TOOL = "pwsh" if os.name == "nt" else "bash"
+# Public failure metadata is literal/source-derived only. Never include exception
+# messages, assertion values, paths, HTTP bodies, environment or raw child output.
+COMMAND_STAGES = frozenset(("native-command", "helper-configure", "helper-invoke", "lifecycle", "continuation", "restore-methods", "shell"))
+PROCESS_STAGES = frozenset(("create", "assign", "communicate", "cleanup", "complete"))
+FIXTURE_STAGES = frozenset((
+    "imports", "runtime-resolve", "client-enter", "initialize", "harness-enter",
+    "first-turn", "second-turn", "restore-request", "shell-turn", "shutdown", "result",
+))
+EXCEPTION_TYPES = frozenset((
+    "AssertionError", "NativeCommandFailure", "RuntimeError", "ValueError", "TypeError", "TimeoutError", "OSError",
+    "FileNotFoundError", "PermissionError", "ImportError", "ModuleNotFoundError", "TimeoutExpired",
+    "JsonRpcError", "ValidationError", "JSONDecodeError", "KeyError", "AttributeError", "UnicodeError", "UnicodeDecodeError",
+    "HarnessError", "HarnessTimeoutError", "HarnessProcessError", "HarnessProtocolError",
+))
+HELPER_ERROR_CODES = frozenset((
+    "SDK_NOT_READY", "SDK_IMPORT_FAILED", "SDK_FAILURE", "SDK_REQUEST_TIMEOUT", "INVALID_SDK_RESULT",
+    "PROCESS_OWNERSHIP_FAILED", "PROCESS_CLEANUP_FAILED", "WORKER_FAILURE", "UNSUPPORTED_CONTINUATION",
+    "BINDING_REQUIRED", "BINDING_CHANGED", "STALE_BINDING", "INVALID_LIFECYCLE", "INVALID_BINDING",
+    "INVALID_PATH", "UNSAFE_STATE_PATH", "INVALID_PROFILE", "NON_SDK_PROFILE", "MISSING_CUSTOM_PROFILE",
+    "INVALID_PROMPT", "INVALID_PATCH", "INVALID_PRIVACY_PATCH", "INVALID_MODEL_OPTION", "INVALID_TIMEOUT",
+    "INVALID_SESSION_ID", "INVALID_WORKER_REQUEST", "INVOCATION_DEADLINE", "IO_OR_STATE_FAILURE",
+))
+
+
+def command_diagnostic(returncode: Any, timed_out: bool, stdout: bytes | str = b"", stderr: bytes | str = b"") -> dict[str, Any]:
+    """Reconstruct fixed codes from redacted JSON envelopes, not native output."""
+    value: dict[str, Any] = {"timed_out": timed_out}
+    if type(returncode) is int and -(2**31) <= returncode < 2**32:
+        value["returncode"] = returncode
+    for raw, channel in ((stdout, "helper"), (stderr, "fixture")):
+        if len(raw) > 64 * 1024:
+            continue
+        try:
+            envelope = json.loads(raw)
+        except (ValueError, TypeError, UnicodeError, RecursionError):
+            continue
+        if not isinstance(envelope, dict):
+            continue
+        if channel == "helper" and envelope.get("ok") is False and envelope.get("action") in ("configure", "invoke"):
+            error = envelope.get("error")
+            code = error.get("code") if isinstance(error, dict) else None
+            if isinstance(code, str) and code in HELPER_ERROR_CODES:
+                value["helper_error"] = code
+        elif channel == "fixture" and envelope.get("fixture_failed") is True:
+            kind, stage = envelope.get("error_type"), envelope.get("fixture_stage")
+            if isinstance(kind, str) and kind in EXCEPTION_TYPES:
+                value["child_exception"] = kind
+            if isinstance(stage, str) and stage in FIXTURE_STAGES:
+                value["fixture_stage"] = stage
+    return value
 
 
 @dataclass
@@ -55,6 +105,14 @@ class OwnedResult:
     stderr: str
     timed_out: bool
     observed_processes: int
+
+
+class NativeCommandFailure(AssertionError):
+    """Carry fixed CI metadata, never the child output or assertion values."""
+
+    def __init__(self, stage: str, result: OwnedResult) -> None:
+        super().__init__("native command failed; raw diagnostics withheld")
+        self.ci_diagnostic = {"stage": stage, **command_diagnostic(result.returncode, result.timed_out, result.stdout, result.stderr)}
 
 
 def isolated_environment(root: Path, *, base_url: str | None = None) -> dict[str, str]:
@@ -326,7 +384,7 @@ class _WindowsOwnedJob:
 
 def run_owned(
     command: list[str], *, cwd: Path, env: dict[str, str], timeout: float,
-    input_text: str | None = None,
+    input_text: str | None = None, diagnostic: dict[str, Any] | None = None,
 ) -> OwnedResult:
     """Outer wall-clock watchdog independent of the SDK/helper request timeout.
 
@@ -335,6 +393,8 @@ def run_owned(
     process group AND descendants that start another session (as the helper
     intentionally does). Normal completion is also checked for live leaks.
     """
+    if diagnostic is not None:
+        diagnostic.update(process_stage="create")
     job = _WindowsOwnedJob() if os.name == "nt" else None
     argv = command
     payload = (input_text or "").encode("utf-8")
@@ -351,14 +411,20 @@ def run_owned(
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             start_new_session=os.name != "nt",
         )
+        if diagnostic is not None:
+            diagnostic.update(process_stage="assign")
         if job is not None:
             job.assign(process)
         else:
             tree = _PosixOwnedTree(process)
+        if diagnostic is not None:
+            diagnostic.update(process_stage="communicate")
         try:
             stdout, stderr = process.communicate(payload, timeout=timeout)
         except subprocess.TimeoutExpired:
             timed_out = True
+            if diagnostic is not None:
+                diagnostic.update(process_stage="cleanup", timed_out=True)
             if job is not None:
                 job.terminate()
             assert job is not None or tree is not None
@@ -366,8 +432,14 @@ def run_owned(
             cleaned = True
             stdout, stderr = process.communicate(timeout=5)
         else:
+            # Keep only reconstructed fields before cleanup, so a cleanup
+            # assertion cannot erase the command's safe exit/stage evidence.
+            if diagnostic is not None:
+                diagnostic.update(process_stage="cleanup", **command_diagnostic(process.returncode, False, stdout, stderr))
             observed = job.cleanup(timed_out=False) if job is not None else tree.cleanup(timed_out=False)  # type: ignore[union-attr]
             cleaned = True
+        if diagnostic is not None:
+            diagnostic.update(process_stage="complete", **command_diagnostic(process.returncode, timed_out, stdout, stderr))
         return OwnedResult(
             process.returncode, stdout.decode("utf-8", errors="replace"),
             stderr.decode("utf-8", errors="replace"), timed_out, observed,
@@ -654,9 +726,15 @@ class NativeRuntimeIntegration(unittest.TestCase):
         self.root = Path(self.temporary.name).resolve()
         self.fixture = RuntimeFixture(self.root)
 
-    def assert_owned_success(self, result: OwnedResult) -> dict[str, Any]:
-        self.assertFalse(result.timed_out, "independent CI watchdog fired")
-        self.assertEqual(result.returncode, 0, "native helper/fixture returned nonzero (raw runtime diagnostics withheld)")
+    def run_command(self, command: list[str], *, stage: str, **options: Any) -> OwnedResult:
+        if stage not in COMMAND_STAGES:
+            raise ValueError("unknown native command stage")
+        self.ci_diagnostic = {"stage": stage}
+        return run_owned(command, diagnostic=self.ci_diagnostic, **options)
+
+    def assert_owned_success(self, result: OwnedResult, *, stage: str = "native-command") -> dict[str, Any]:
+        if result.timed_out or result.returncode != 0:
+            raise NativeCommandFailure(stage, result)
         self.assertFalse(DUMMY_KEY in result.stdout + result.stderr, "dummy provider key leaked; captured output withheld")
         self.assertFalse(PRIVATE_ERROR in result.stdout + result.stderr, "private provider error leaked; captured output withheld")
         try:
@@ -667,11 +745,11 @@ class NativeRuntimeIntegration(unittest.TestCase):
         return value
 
     def configure(self, fixture: RuntimeFixture, environment: dict[str, str]) -> None:
-        result = run_owned([
+        result = self.run_command([
             sys.executable, "-I", "-B", str(HELPER), "configure", "--project-root", str(fixture.project),
             "--home", str(fixture.home), "--profile", fixture.profile, "--confirmed",
-        ], cwd=fixture.workspace, env=environment, timeout=20)
-        self.assert_owned_success(result)
+        ], stage="helper-configure", cwd=fixture.workspace, env=environment, timeout=20)
+        self.assert_owned_success(result, stage="helper-configure")
 
     def invoke(
         self, fixture: RuntimeFixture, environment: dict[str, str], *,
@@ -689,8 +767,8 @@ class NativeRuntimeIntegration(unittest.TestCase):
             command.extend(["--prompt-file", str(fixture.prompt)])
         if session_id is not None:
             command.extend(["--session-id", session_id])
-        return run_owned(
-            command, cwd=fixture.workspace, env=environment, timeout=total_timeout + 20,
+        return self.run_command(
+            command, stage="helper-invoke", cwd=fixture.workspace, env=environment, timeout=total_timeout + 20,
             input_text=(input_text or "Reply with DSH_CI_FINAL_OK only; do not use tools.\n") if stdin else None,
         )
 
@@ -733,11 +811,11 @@ class NativeRuntimeIntegration(unittest.TestCase):
         fixture = self.fixture
         _ = self.privacy_original
         with MockModel() as model:
-            result = run_owned([
+            result = self.run_command([
                 sys.executable, "-I", "-B", str(Path(__file__).resolve()), "--native-child", "lifecycle",
                 str(fixture.child_config(model.url)),
-            ], cwd=fixture.workspace, env=fixture.environment(model.url), timeout=45)
-            value = self.assert_owned_success(result)
+            ], stage="lifecycle", cwd=fixture.workspace, env=fixture.environment(model.url), timeout=45)
+            value = self.assert_owned_success(result, stage="lifecycle")
             self.assertEqual(value["server_name"], "deepseek-harness-sdk-runtime")
             self.assertEqual(value["server_version"], "0.0.1")
             self.assertEqual(value["profile"], "sdk")
@@ -757,7 +835,7 @@ class NativeRuntimeIntegration(unittest.TestCase):
             # in its disposable worker, not only in the runtime's child env map.
             environment["DSH_RUNTIME_MODE"] = "node"
             self.configure(fixture, environment)
-            first = self.assert_owned_success(self.invoke(fixture, environment))
+            first = self.assert_owned_success(self.invoke(fixture, environment), stage="helper-invoke")
             self.assertEqual(set(first), {"session_id", "finish_reason", "final_response"})
             self.assertIsInstance(first["session_id"], str)
             self.assertTrue(first["session_id"])
@@ -778,11 +856,11 @@ class NativeRuntimeIntegration(unittest.TestCase):
         fixture = self.fixture
         _ = self.privacy_original
         with MockModel("continuation") as model:
-            result = run_owned([
+            result = self.run_command([
                 sys.executable, "-I", "-B", str(Path(__file__).resolve()), "--native-child", "continuation",
                 str(fixture.child_config(model.url)),
-            ], cwd=fixture.workspace, env=fixture.environment(model.url), timeout=60)
-            value = self.assert_owned_success(result)
+            ], stage="continuation", cwd=fixture.workspace, env=fixture.environment(model.url), timeout=60)
+            value = self.assert_owned_success(result, stage="continuation")
             self.assertEqual(value["first_response"], FIRST_RESPONSE)
             self.assertEqual(value["second_response"], FOLLOWUP_RESPONSE)
             self.assertEqual(value["finish_reason"], "completed")
@@ -801,11 +879,11 @@ class NativeRuntimeIntegration(unittest.TestCase):
         fixture = self.fixture
         _ = self.privacy_original
         with MockModel() as model:
-            result = run_owned([
+            result = self.run_command([
                 sys.executable, "-I", "-B", str(Path(__file__).resolve()), "--native-child", "restore-methods",
                 str(fixture.child_config(model.url)),
-            ], cwd=fixture.workspace, env=fixture.environment(model.url), timeout=45)
-            value = self.assert_owned_success(result)
+            ], stage="restore-methods", cwd=fixture.workspace, env=fixture.environment(model.url), timeout=45)
+            value = self.assert_owned_success(result, stage="restore-methods")
             self.assertEqual(value["unsupported_methods"], ["session/resume", "session/load", "session/restore"])
             self.assertFalse(model.requests, "restore capability check must have zero model traffic")
             self.assertFalse(model.errors)
@@ -860,11 +938,11 @@ class NativeRuntimeIntegration(unittest.TestCase):
         fixture = RuntimeFixture(self.root / "explicit minimal synthetic", "sdk-minimal")
         _ = self.privacy_original
         with MockModel("shell", workspace=fixture.workspace) as model:
-            result = run_owned([
+            result = self.run_command([
                 sys.executable, "-I", "-B", str(Path(__file__).resolve()), "--native-child", "shell",
                 str(fixture.child_config(model.url)),
-            ], cwd=fixture.workspace, env=fixture.environment(model.url), timeout=90)
-            value = self.assert_owned_success(result)
+            ], stage="shell", cwd=fixture.workspace, env=fixture.environment(model.url), timeout=90)
+            value = self.assert_owned_success(result, stage="shell")
             self.assertEqual(value["profile"], "sdk-minimal")
             self.assertEqual(value["finish_reason"], "completed")
             self.assertTrue(value["final_response"] == SHELL_TEXT, "unexpected shell final response; captured response withheld")
@@ -876,12 +954,18 @@ class NativeRuntimeIntegration(unittest.TestCase):
         self.assert_original_files_unchanged(fixture)
 
 
-def _native_child(scenario: str, config_path: str) -> int:
+def _native_child(scenario: str, config_path: str, diagnostic: dict[str, Any] | None = None) -> int:
     """A watchdog-contained fixture calling the public, installed SDK only."""
+    def stage(value: str) -> None:
+        if diagnostic is not None:
+            diagnostic["fixture_stage"] = value
+
+    stage("imports")
     from deepseek_harness import DeepSeekHarness
     from deepseek_harness.client import HarnessClient, HarnessConfig
     from deepseek_harness_runtime import bundled_runtime_path, resolve_bundled_launch_args
 
+    stage("runtime-resolve")
     config = json.loads(Path(config_path).read_text(encoding="utf-8"))
     executable = bundled_runtime_path().resolve()
     launch = resolve_bundled_launch_args("exe")
@@ -896,12 +980,16 @@ def _native_child(scenario: str, config_path: str) -> int:
         "shutdown_timeout_seconds": 3,
     }
     if scenario == "lifecycle":
+        stage("client-enter")
         with HarnessClient(HarnessConfig(**common)) as client:
+            stage("initialize")
             initialized = client.initialize(cwd=config["cwd"], provider="deepseek-official", model="ci-mock-model")
             process = client._proc  # Test-only assertion of actual SDK subprocess reaping.
             if process is None:
                 raise AssertionError("SDK did not start a runtime")
             runtime_pid = process.pid
+            stage("shutdown")
+        stage("result")
         info = initialized.serverInfo
         value = {
             "server_name": info.name if info else None, "server_version": info.version if info else None,
@@ -909,14 +997,19 @@ def _native_child(scenario: str, config_path: str) -> int:
             "profile": config["profile"], "carrier": "exe",
         }
     elif scenario == "continuation":
+        stage("harness-enter")
         with DeepSeekHarness(
             **common, provider="deepseek-official", model="ci-mock-model",
             base_url=config["base_url"], api_key=DUMMY_KEY,
         ) as harness:
+            stage("first-turn")
             first = harness.run(FIRST_PROMPT, session_id="ci-same-runtime-continuation")
             if first.finish_reason != "completed":
                 raise AssertionError("first same-runtime turn failed")
+            stage("second-turn")
             second = harness.run(FOLLOWUP_PROMPT, session_id=first.session_id)
+            stage("shutdown")
+        stage("result")
         value = {
             "session_id": second.session_id, "finish_reason": second.finish_reason,
             "first_response": first.final_response, "second_response": second.final_response,
@@ -929,9 +1022,12 @@ def _native_child(scenario: str, config_path: str) -> int:
             pass
 
         unsupported = []
+        stage("client-enter")
         with HarnessClient(HarnessConfig(**common)) as client:
+            stage("initialize")
             client.initialize(cwd=config["cwd"], provider="deepseek-official", model="ci-mock-model")
             for method in ("session/resume", "session/load", "session/restore"):
+                stage("restore-request")
                 try:
                     client.request(method, {"sessionId": "ci-no-persisted-session"}, response_model=EmptyResponse)
                 except JsonRpcError as error:
@@ -940,15 +1036,21 @@ def _native_child(scenario: str, config_path: str) -> int:
                     unsupported.append(method)
                 else:
                     raise AssertionError("released SDK unexpectedly implements restoration; revisit helper policy")
+            stage("shutdown")
+        stage("result")
         value = {"unsupported_methods": unsupported}
     elif scenario == "shell":
         if config["profile"] != "sdk-minimal":
             raise AssertionError("persistent-shell fixture must opt into sdk-minimal explicitly")
+        stage("harness-enter")
         with DeepSeekHarness(
             **common, provider="deepseek-official", model="ci-mock-model",
             base_url=config["base_url"], api_key=DUMMY_KEY,
         ) as harness:
+            stage("shell-turn")
             result = harness.run("Exercise the synthetic persistent shell.", session_id="ci-explicit-minimal")
+            stage("shutdown")
+        stage("result")
         value = {
             "session_id": result.session_id, "finish_reason": result.finish_reason,
             "final_response": result.final_response, "profile": config["profile"], "shell": SHELL_TOOL,
@@ -972,10 +1074,16 @@ if __name__ == "__main__":
     if sys.argv[1:2] == ["--owned-child"]:
         raise SystemExit(_owned_child(sys.argv[2:]))
     if sys.argv[1:2] == ["--native-child"]:
+        diagnostic: dict[str, Any] = {}
         try:
-            raise SystemExit(_native_child(sys.argv[2], sys.argv[3]))
+            raise SystemExit(_native_child(sys.argv[2], sys.argv[3], diagnostic))
         except Exception as error:
-            # Public CI must never dump arbitrary SDK error text/events.
-            print(json.dumps({"fixture_failed": True, "error_type": type(error).__name__}), file=sys.stderr)
+            # Emit only literal allowlisted fields, never arbitrary SDK text.
+            value: dict[str, Any] = {"fixture_failed": True}
+            if type(error).__name__ in EXCEPTION_TYPES:
+                value["error_type"] = type(error).__name__
+            if diagnostic.get("fixture_stage") in FIXTURE_STAGES:
+                value["fixture_stage"] = diagnostic["fixture_stage"]
+            print(json.dumps(value), file=sys.stderr)
             raise SystemExit(1)
     unittest.main()

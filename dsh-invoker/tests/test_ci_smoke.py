@@ -23,7 +23,8 @@ SECRET = "sk-fake-ci-private-request-payload-never-print"
 
 class CiSmokeTests(unittest.TestCase):
     def setUp(self):
-        scratch = ci.CHECKOUT / ci.STATE_NAME / "dev-tests"
+        configured = os.environ.get("DSH_INVOKER_TEST_TMP") or os.environ.get("DSH_INVOKER_TEST_ROOT")
+        scratch = Path(configured) if configured else ci.CHECKOUT / ci.STATE_NAME / "dev-tests"
         scratch.mkdir(parents=True, exist_ok=True)
         temporary = tempfile.TemporaryDirectory(prefix="ci-smoke-", dir=scratch)
         self.addCleanup(temporary.cleanup)
@@ -207,6 +208,159 @@ class CiSmokeTests(unittest.TestCase):
         self.assertEqual(json.loads(out.getvalue()), diagnostic)
         self.assertEqual(err.getvalue(), "")
         self.assertNotIn(SECRET, out.getvalue())
+
+    def native_suite(self, function):
+        name = "test_published_executable_initialize_shutdown_has_zero_model_requests"
+        case = type("NativeRuntimeIntegration", (unittest.TestCase,), {
+            "__module__": "test_runtime_integration", name: function,
+            "run_command": ci._support.NativeRuntimeIntegration.run_command,
+            "assert_owned_success": ci._support.NativeRuntimeIntegration.assert_owned_success,
+        })
+        return unittest.TestSuite([case(name)])
+
+    def test_native_command_diagnostics_withhold_child_data(self):
+        result = self.owned_result(
+            json.dumps({"ok": False, "action": "invoke", "error": {"code": "SDK_FAILURE", "message": SECRET}}),
+            json.dumps({"fixture_failed": True, "error_type": "RuntimeError", "private": SECRET}),
+            returncode=5,
+        )
+        def command_failure(case):
+            ci._support.NativeRuntimeIntegration.assert_owned_success(case, result, stage="lifecycle")
+
+        with mock.patch.object(unittest.TestResult, "_exc_info_to_string", side_effect=AssertionError("must not format errors")):
+            diagnostic = ci.run_suite(self.native_suite(command_failure), "native")
+        self.assertEqual(diagnostic["counts"]["failures"], 1)
+        self.assertEqual(diagnostic["counts"]["errors"], 0)
+        detail = diagnostic["native_failures"][0]
+        self.assertIn((detail["site"], detail["line"]), ci.NATIVE_SOURCE_SITES)
+        self.assertEqual(detail, {
+            "test_id": "test_runtime_integration.NativeRuntimeIntegration.test_published_executable_initialize_shutdown_has_zero_model_requests",
+            "exception": "NativeCommandFailure", "site": "assert_owned_success", "line": detail["line"], "stage": "lifecycle",
+            "returncode": 5, "timed_out": False, "helper_error": "SDK_FAILURE", "child_exception": "RuntimeError",
+        })
+        self.assertNotIn(SECRET, json.dumps(diagnostic))
+        public = self.command_failure(self.owned_result(json.dumps(diagnostic), SECRET), lane="native", action="exec")
+        self.assertIn('"stage": "lifecycle"', public)
+        self.assertIn('"returncode": 5', public)
+        self.assertNotIn('"message"', public)
+        self.assertNotIn('"private"', public)
+        # Raw, mixed, oversized and unknown child diagnostics remain withheld.
+        for stderr in (SECRET, SECRET + result.stderr, " " * ci.MAX_DIAGNOSTIC + result.stderr,
+                       json.dumps({"fixture_failed": True, "error_type": SECRET})):
+            bad = self.owned_result("", stderr, returncode=1)
+            failure = ci._support.NativeCommandFailure("lifecycle", bad)
+            detail_input = {**detail, **failure.ci_diagnostic}
+            detail_input.pop("helper_error", None)
+            detail_input.pop("child_exception", None)
+            if "child_exception" in failure.ci_diagnostic:
+                detail_input["child_exception"] = failure.ci_diagnostic["child_exception"]
+                self.assertIsNone(ci.native_failure_diagnostic(detail_input, ci.allowed_test_ids("native")))
+            else:
+                safe = ci.native_failure_diagnostic(detail_input, ci.allowed_test_ids("native"))
+                self.assertNotIn(SECRET, json.dumps(safe))
+                self.assertNotIn("child_exception", safe)
+
+    def test_native_assertion_sites_and_cleanup_errors_preserve_outcomes(self):
+        # Use real checked-in methods as traceback sites; never publish the
+        # exception string (which intentionally contains private data here).
+        result = self.owned_result("", SECRET, returncode=0)
+        def assertion_failure(case):
+            ci._support.NativeRuntimeIntegration.assert_owned_success(case, result)
+
+        diagnostic = ci.run_suite(self.native_suite(assertion_failure), "native")
+        self.assertEqual(diagnostic["counts"]["failures"], 1)
+        self.assertEqual(diagnostic["native_failures"][0]["site"], "assert_owned_success")
+        self.assertNotIn(SECRET, json.dumps(diagnostic))
+        fixture = ci._support.RuntimeFixture(self.root / "synthetic native diagnostics")
+        def cleanup_failure(case):
+            ci._support.NativeRuntimeIntegration.configure(case, fixture, {})
+
+        for exception, outcome in ((AssertionError(SECRET), "failures"), (PermissionError(SECRET), "errors")):
+            with mock.patch.object(ci._support, "run_owned", side_effect=exception):
+                diagnostic = ci.run_suite(self.native_suite(cleanup_failure), "native")
+            self.assertEqual(diagnostic["counts"][outcome], 1)
+            self.assertEqual(diagnostic["native_failures"][0]["site"], "run_command")
+            self.assertEqual(diagnostic["native_failures"][0]["stage"], "helper-configure")
+            self.assertEqual(diagnostic["native_failures"][0]["exception"], type(exception).__name__)
+            self.assertNotIn(SECRET, json.dumps(diagnostic))
+
+    def test_native_cleanup_failure_keeps_precleanup_exit_and_stage(self):
+        # The command finished, but cleanup raises: keep the safe exit evidence
+        # even though run_owned has no OwnedResult to return. No process starts.
+        process = mock.Mock(returncode=5)
+        process.communicate.return_value = (
+            json.dumps({"ok": False, "action": "invoke", "error": {"code": "SDK_FAILURE", "message": SECRET}}).encode(),
+            json.dumps({"fixture_failed": True, "error_type": "RuntimeError", "fixture_stage": "initialize", "private": SECRET}).encode(),
+        )
+        process.stdin = process.stdout = process.stderr = None
+        tree, job = mock.Mock(), mock.Mock()
+        for owner in (tree, job):
+            owner.cleanup.side_effect = [AssertionError(SECRET), 1]
+        fixture = ci._support.RuntimeFixture(self.root / "cleanup diagnostic")
+        def fail_after_command(case):
+            case.run_command(["not executed"], stage="lifecycle", cwd=fixture.workspace, env={}, timeout=1)
+
+        with mock.patch.object(ci._support.subprocess, "Popen", return_value=process), \
+             mock.patch.object(ci._support, "_PosixOwnedTree", return_value=tree), \
+             mock.patch.object(ci._support, "_WindowsOwnedJob", return_value=job):
+            diagnostic = ci.run_suite(self.native_suite(fail_after_command), "native")
+        self.assertEqual(diagnostic["counts"]["failures"], 1)
+        self.assertEqual(diagnostic["counts"]["errors"], 0)
+        detail = diagnostic["native_failures"][0]
+        self.assertEqual(detail["site"], "run_owned")
+        self.assertEqual(detail["stage"], "lifecycle")
+        self.assertEqual(detail["process_stage"], "cleanup")
+        self.assertEqual(detail["returncode"], 5)
+        self.assertIs(detail["timed_out"], False)
+        self.assertEqual(detail["helper_error"], "SDK_FAILURE")
+        self.assertEqual(detail["child_exception"], "RuntimeError")
+        self.assertEqual(detail["fixture_stage"], "initialize")
+        self.assertIn((detail["site"], detail["line"]), ci.NATIVE_SOURCE_SITES)
+        self.assertNotIn(SECRET, json.dumps(diagnostic))
+        public = self.command_failure(self.owned_result(json.dumps(diagnostic), SECRET), lane="native")
+        self.assertIn('"process_stage": "cleanup"', public)
+        self.assertIn('"fixture_stage": "initialize"', public)
+
+    def test_native_command_parser_rejects_raw_and_unknown_metadata(self):
+        baseline = {"returncode": 1, "timed_out": False}
+        for raw in (
+            SECRET, SECRET + '{}', json.dumps({"fixture_failed": True, "error_type": SECRET, "fixture_stage": SECRET}),
+            json.dumps({"fixture_failed": True, "error_type": [], "fixture_stage": {}}),
+            " " * ci.MAX_DIAGNOSTIC + '{}', '[' * 2000 + ']' * 2000,
+        ):
+            with self.subTest(kind=len(raw)):
+                self.assertEqual(ci._support.command_diagnostic(1, False, raw, raw), baseline)
+        self.assertEqual(ci._support.command_diagnostic(1, False, b"\xff", b"\xff"), baseline)
+        for code in (True, -2**31 - 1, 2**32, SECRET):
+            self.assertEqual(ci._support.command_diagnostic(code, False), {"timed_out": False})
+        for code in (-2**31, -9, 0, 5, 124, 2**32 - 1):
+            self.assertEqual(ci._support.command_diagnostic(code, False), {"returncode": code, "timed_out": False})
+
+    def test_native_diagnostics_reject_unknown_values(self):
+        def command_failure(case):
+            ci._support.NativeRuntimeIntegration.assert_owned_success(case, self.owned_result(), stage="lifecycle")
+
+        diagnostic = ci.run_suite(self.native_suite(command_failure), "native")
+        detail = diagnostic["native_failures"][0]
+        allowed = ci.allowed_test_ids("native")
+        self.assertIsNotNone(ci.unittest_diagnostic(json.dumps(diagnostic), "native"))
+        for field, invalid in (
+            ("test_id", SECRET), ("exception", SECRET), ("site", SECRET), ("stage", SECRET),
+            ("helper_error", SECRET), ("child_exception", SECRET), ("exception", []), ("site", {}),
+            ("stage", []), ("returncode", True), ("returncode", 2**32), ("timed_out", 1),
+            ("line", True), ("line", -1), ("line", 10**9), ("process_stage", SECRET), ("process_stage", []),
+            ("fixture_stage", SECRET), ("fixture_stage", {}),
+        ):
+            with self.subTest(field=field, kind=type(invalid).__name__):
+                rejected = {**detail, field: invalid}
+                self.assertIsNone(ci.native_failure_diagnostic(rejected, allowed))
+                child = {**diagnostic, "native_failures": [rejected]}
+                public = self.command_failure(self.owned_result(json.dumps(child), SECRET), lane="native")
+                self.assertNotIn("safe diagnostic=", public)
+        extra = {**detail, "private": SECRET, "traceback": SECRET, "locals": SECRET}
+        safe = ci.native_failure_diagnostic(extra, allowed)
+        self.assertEqual(safe, detail)
+        self.assertNotIn(SECRET, json.dumps(safe))
 
     @unittest.skipIf(os.name == "nt", "POSIX system utility fixture; no Windows symlinks")
     def test_controlled_path_hashes_known_file_without_uv(self):

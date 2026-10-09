@@ -132,7 +132,9 @@ class FixtureCase(unittest.TestCase):
                 self.env.pop(key, None)
         self.env["HOME"] = str(self.home)
         self.env["PATH"] = str(self.tools)
-        for name in ("dirname", "uname", "sw_vers", "getconf", "mkdir", "rmdir", "mktemp", "curl", "tar", "sha256sum", "shasum", "cp", "chmod", "rm", "readlink"):
+        # GNU tar invokes gzip through PATH for -z; BSD tar may decompress
+        # internally. Keep the fixture usable on both without system bin dirs.
+        for name in ("dirname", "uname", "sw_vers", "getconf", "mkdir", "rmdir", "mktemp", "curl", "tar", "gzip", "sha256sum", "shasum", "cp", "chmod", "rm", "readlink"):
             source = shutil.which(name)
             if source and os.name != "nt":
                 (self.tools / name).symlink_to(source)
@@ -162,6 +164,22 @@ class FixtureCase(unittest.TestCase):
 
 @unittest.skipIf(os.name == "nt" or BASH is None, "POSIX Bash lane; native PowerShell tests run separately")
 class PosixBootstrapTests(FixtureCase):
+    def test_controlled_path_gzip_round_trip_without_uv_or_python(self):
+        # Exercise gzip itself: BSD tar's built-in decompressor would mask a
+        # missing executable in this exact PATH, while GNU tar requires it.
+        self.assertEqual(self.env["PATH"], str(self.tools))
+        for name in ("uv", "uv.exe", "uv.cmd", "uv.bat", "python", "python3"):
+            self.assertIsNone(shutil.which(name, path=self.env["PATH"]))
+        gzip = shutil.which("gzip", path=self.env["PATH"])
+        self.assertIsNotNone(gzip, "the archive fixture must provide native gzip")
+        original = b"offline GNU tar decompressor dependency\n"
+        compressed = subprocess.run([gzip, "-c"], input=original, env=self.env, cwd=SKILL / "scripts",
+                                    capture_output=True, timeout=10, check=True)
+        restored = subprocess.run([gzip, "-dc"], input=compressed.stdout, env=self.env, cwd=SKILL / "scripts",
+                                  capture_output=True, timeout=10, check=True)
+        self.assertEqual(restored.stdout, original)
+        self.assertFalse(self.state.exists(), "decompressor proof must not install a runtime")
+
     def test_check_no_uv_or_python_is_read_only(self):
         before = sorted(str(p.relative_to(self.base)) for p in self.base.rglob("*"))
         result = self.bash("check")
@@ -412,6 +430,35 @@ class PosixBootstrapTests(FixtureCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("uv_capability", result.stderr)
         self.assertFalse((self.state / "venv").exists())
+
+    def test_controlled_gzip_and_tar_work_without_uv_or_python(self):
+        # Exercise the allowlisted executable itself, not Python's decompressor.
+        # GNU tar's -z needs this command; BSD tar can hide a missing gzip.
+        for name in ("uv", "uv.exe", "python", "python3"):
+            self.assertIsNone(shutil.which(name, path=self.env["PATH"]))
+        gzip = self.tools / "gzip"
+        source = gzip.resolve(strict=True)
+        self.assertEqual(source, Path(shutil.which("gzip")).resolve())
+        archive = self.base / "authored compression fixture.tar.gz"
+        with tarfile.open(archive, "w:gz") as tf:
+            content = b"offline gzip dependency proof\n"
+            entry = tarfile.TarInfo("authored/uv")
+            entry.size = len(content)
+            tf.addfile(entry, io.BytesIO(content))
+        command = [BASH, "-c", 'gzip -t -- "$1"', "fixture", str(archive)]
+        gzip.unlink()
+        missing = subprocess.run(command, cwd=SKILL / "scripts", env=self.env, capture_output=True, timeout=10)
+        self.assertEqual(missing.returncode, 127)
+        gzip.symlink_to(source)
+        present = subprocess.run(command, cwd=SKILL / "scripts", env=self.env, capture_output=True, timeout=10)
+        self.assertEqual(present.returncode, 0)
+        extracted = subprocess.run(
+            [str(self.tools / "tar"), "-xOzf", str(archive), "authored/uv"],
+            cwd=SKILL / "scripts", env=self.env, capture_output=True, timeout=10,
+        )
+        self.assertEqual(extracted.returncode, 0)
+        self.assertEqual(extracted.stdout, content)
+        self.assertFalse(self.state.exists(), "compression proof must not install a runtime")
 
     def test_absent_uv_verified_archive_is_made_executable_before_use(self):
         self.fake_uv()

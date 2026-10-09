@@ -413,6 +413,111 @@ class PosixBootstrapTests(FixtureCase):
         self.assertIn("uv_capability", result.stderr)
         self.assertFalse((self.state / "venv").exists())
 
+    def test_absent_uv_verified_archive_is_made_executable_before_use(self):
+        self.fake_uv()
+        executable = (self.tools / "uv").read_bytes()
+        (self.tools / "uv").unlink()
+        self.assertEqual(json.loads(self.bash("check").stdout)["uv"]["source"], "absent")
+        copied = self.base / "offline archive skill"
+        (copied / "scripts").mkdir(parents=True)
+        (copied / "assets").mkdir()
+        shutil.copyfile(SCRIPT, copied / "scripts/bootstrap.sh")
+        metadata = json.loads((SKILL / "assets/uv-release.json").read_text(encoding="utf-8"))
+        platform_name = json.loads(self.bash("check").stdout)["platform"]
+        asset, _ = metadata["assets"][platform_name]
+        archive = self.base / "offline archive" / asset
+        archive.parent.mkdir()
+        with tarfile.open(archive, "w:gz") as tf:
+            entry = tarfile.TarInfo(asset.removesuffix(".tar.gz") + "/uv")
+            entry.size, entry.mode = len(executable), 0o600
+            tf.addfile(entry, io.BytesIO(executable))
+        (copied / "assets/uv-release.json").write_text(
+            '{\n "version": "0.12.24",\n "' + platform_name + '": ["' + asset + '", "'
+            + hashlib.sha256(archive.read_bytes()).hexdigest() + '"]\n}\n', encoding="utf-8",
+        )
+        curl = self.tools / "curl"
+        curl.unlink()
+        curl.write_text(
+            '#!/bin/bash\nwhile [[ $# -gt 0 ]]; do if [[ "$1" = --output ]]; then shift; out="$1"; fi; shift; done\n'
+            + shlex.quote(shutil.which("cp")) + ' ' + shlex.quote(str(archive)) + ' "$out"\n', encoding="utf-8",
+        )
+        curl.chmod(0o700)
+        result = self.bash("setup", script=copied / "scripts/bootstrap.sh")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        installed = self.state / "bin/uv"
+        self.assertEqual(installed.read_bytes(), executable)
+        self.assertEqual(installed.stat().st_mode & 0o777, 0o700)
+        self.assertTrue((self.state / "runtime.json").is_file())
+        self.assertFalse((self.state / ".bootstrap-lock").exists())
+
+    def test_absent_uv_portable_chmod_and_denial_before_execution(self):
+        # A test-authored uv script/archive exercises the real copy/mode callsite
+        # without downloading or installing a tool. Its Python code stays outside
+        # the extraction directory and is started by an absolute -I interpreter.
+        self.fake_uv()
+        wrapper = self.tools / "uv"
+        payload = wrapper.read_bytes()
+        wrapper.unlink()
+        self.env["FAKE_UV_VERSION"] = "0.12.24"
+        copied = self.base / "fixture skill"
+        (copied / "scripts").mkdir(parents=True)
+        (copied / "assets").mkdir()
+        shutil.copyfile(SCRIPT, copied / "scripts/bootstrap.sh")
+        platform_name = json.loads(self.bash("check").stdout)["platform"]
+        asset = json.loads((SKILL / "assets/uv-release.json").read_text(encoding="utf-8"))["assets"][platform_name][0]
+        archive = self.base / "authored uv.tar.gz"
+        with tarfile.open(archive, "w:gz") as tf:
+            entry = tarfile.TarInfo(asset.removesuffix(".tar.gz") + "/uv")
+            entry.size = len(payload)
+            tf.addfile(entry, io.BytesIO(payload))
+        digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+        (copied / "assets/uv-release.json").write_text(
+            '{\n "version": "0.12.24",\n "' + platform_name + '": ["' + asset + '", "' + digest + '"]\n}\n',
+            encoding="utf-8",
+        )
+        curl = self.tools / "curl"
+        curl.unlink()
+        curl.write_text(
+            '#!/bin/bash\nwhile [[ $# -gt 0 ]]; do if [[ "$1" = --output ]]; then shift; out="$1"; fi; shift; done\n'
+            + shlex.quote(shutil.which("cp")) + ' ' + shlex.quote(str(archive)) + ' "$out"\n', encoding="utf-8",
+        )
+        curl.chmod(0o700)
+        chmod = self.tools / "chmod"
+        native_chmod = str(chmod.resolve())
+        chmod.unlink()
+        chmod.write_text(
+            '#!/bin/bash\n'
+            # GNU may accept misplaced --; enforce the BSD-compatible order on
+            # every host, then delegate to that host's actual chmod executable.
+            '[[ "$#" = 3 && "$1" = -- && "$2" = 700 && "$3" = /* ]] || exit 91\n'
+            'if [[ "${FAKE_CHMOD_DENY:-}" = 1 ]]; then printf "PRIVATE chmod denial\\n" >&2; exit 93; fi\n'
+            + 'exec ' + shlex.quote(native_chmod) + ' "$@"\n', encoding="utf-8",
+        )
+        chmod.chmod(0o700)
+        original = self.project
+        for denied in (False, True):
+            with self.subTest(denied=denied):
+                self.project = original / ("denied" if denied else "allowed")
+                self.project.mkdir()
+                self.env["FAKE_CHMOD_DENY"] = "1" if denied else "0"
+                result = self.bash("setup", script=copied / "scripts/bootstrap.sh")
+                installed = self.state / "bin/uv"
+                self.assertEqual(payload, installed.read_bytes())
+                self.assertNotIn("PRIVATE", result.stdout + result.stderr)
+                self.assertFalse((self.state / ".bootstrap-lock").exists())
+                if denied:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(json.loads(result.stderr)["error"], "filesystem")
+                    self.assertEqual(installed.stat().st_mode & 0o777, 0o600)
+                    self.assertFalse((self.state / "uv-calls.jsonl").exists(), "uv ran after chmod denial")
+                    self.assertFalse((self.state / "runtime.json").exists())
+                else:
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertTrue(json.loads(result.stdout)["ok"])
+                    self.assertEqual(installed.stat().st_mode & 0o777, 0o700)
+                    self.assertTrue((self.state / "runtime.json").is_file())
+        self.project = original
+
     def test_absent_uv_archive_rejects_traversal_symlink_and_bad_digest(self):
         # Local test-authored archives replace curl in a copied fixture skill.
         # No remote bytes are executed; extraction is never reached on errors.

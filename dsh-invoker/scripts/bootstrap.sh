@@ -330,7 +330,7 @@ install_local_uv() {
     (set -C; tar -xOzf "$archive" "$root/uv" > "$extract/uv") 2>/dev/null || fail uv_archive 'Cannot extract the validated uv executable.'
     [[ -s "$extract/uv" && ! -L "$extract/uv" && ! -e "$STATE/bin/uv" ]] || fail uv_archive 'The uv executable is empty or would replace an existing file.'
     cp -p -- "$extract/uv" "$STATE/bin/uv" 2>/dev/null || fail filesystem 'Cannot copy uv into the private project bin directory.'
-    chmod 700 -- "$STATE/bin/uv" 2>/dev/null || fail filesystem 'Cannot make the project uv executable runnable.'
+    chmod -- 700 "$STATE/bin/uv" 2>/dev/null || fail filesystem 'Cannot make the project uv executable runnable.'
     UV="$STATE/bin/uv"; UV_SOURCE=project; UV_SHA=$(sha256_file "$UV") || fail uv_digest 'Cannot verify the project uv executable.'
     # Known files only. Failed setups retain their private staging data for local
     # inspection, without ever executing from a download/extract directory.

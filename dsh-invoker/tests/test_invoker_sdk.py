@@ -28,6 +28,37 @@ invoker = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(invoker)
 
 
+def _windows_pid_stopped(pid, timeout_ms=4000):
+    # os.kill(pid, 0) is NOT a passive Windows process probe. Open only a
+    # synchronization handle: no termination, console events or extra privilege.
+    import ctypes
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    kernel.OpenProcess.restype = wintypes.HANDLE
+    kernel.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+    kernel.WaitForSingleObject.restype = wintypes.DWORD
+    kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel.CloseHandle.restype = wintypes.BOOL
+    handle = kernel.OpenProcess(0x00100000, False, pid)  # SYNCHRONIZE only
+    if not handle:
+        error = ctypes.get_last_error()
+        if error == 87:  # ERROR_INVALID_PARAMETER: PID no longer exists
+            return True
+        raise ctypes.WinError(error)  # access/query denial is not cleanup success
+    try:
+        status = kernel.WaitForSingleObject(handle, timeout_ms)
+        if status == 0:  # WAIT_OBJECT_0: the process has exited
+            return True
+        if status == 0x102:  # WAIT_TIMEOUT: the process is still alive
+            return False
+        raise ctypes.WinError(ctypes.get_last_error())
+    finally:
+        if not kernel.CloseHandle(handle):
+            raise ctypes.WinError(ctypes.get_last_error())
+
+
 class FakeSdkFixture(unittest.TestCase):
     def setUp(self):
         scratch = PROJECT / ".dsh-invoker-profile" / "dev-tests"
@@ -199,7 +230,7 @@ class InvocationTests(FakeSdkFixture):
         self.assertTrue(record["patches_is_tuple"])
         self.assertEqual([str(invoker.PRIVACY_PATCH)], options["patches"])
         self.assertEqual({}, record["run_kwargs"])
-        self.assertEqual(self.prompt_file.read_text(encoding="utf-8"), record["prompt"])
+        self.assertEqual(self.prompt_file.read_bytes().decode("utf-8"), record["prompt"])
         self.assertEqual(1, record["calls"]["run"])
         self.assertEqual(1, record["calls"]["exit"])
         self.assertEqual(1, record["calls"]["close"])
@@ -243,7 +274,20 @@ class InvocationTests(FakeSdkFixture):
                 mock.patch.object(invoker, "_supervise", return_value=({"session_id": "s", "finish_reason": "completed", "final_response": "ok"}, 0)) as worker:
             result = self.cli_ok("invoke", "--cwd", self.workspace, "--prompt-file", self.prompt_file.name)
         self.assertEqual("ok", result["final_response"])
-        self.assertEqual(self.prompt_file.read_text(encoding="utf-8"), worker.call_args.args[1]["prompt"])
+        self.assertEqual(self.prompt_file.read_bytes().decode("utf-8"), worker.call_args.args[1]["prompt"])
+
+    def test_prompt_file_preserves_utf8_bytes_for_lf_and_crlf(self):
+        for ending in ("\n", "\r\n"):
+            with self.subTest(ending=repr(ending)):
+                prompt = "Mock prompt 中文." + ending
+                self.prompt_file.write_bytes(prompt.encode("utf-8"))
+                code, result = self.invoke()
+                self.assertEqual(0, code, result)
+                self.assertEqual(prompt, json.loads(self.capture.read_text(encoding="utf-8"))["prompt"])
+                with mock.patch.object(invoker, "_require_sdk"), \
+                        mock.patch.object(invoker, "_supervise", return_value=({"session_id": "s", "finish_reason": "completed", "final_response": "ok"}, 0)) as worker:
+                    self.cli_ok("invoke", "--cwd", self.workspace, "--prompt-file", self.prompt_file.name)
+                self.assertEqual(prompt, worker.call_args.args[1]["prompt"])
 
     def test_model_rpc_options_passed_without_api_key_or_approval_bypass(self):
         code, result = self.invoke("--provider", "mock-provider", "--model", "mock-model", "--max-tokens", "128",
@@ -410,7 +454,51 @@ class InvocationTests(FakeSdkFixture):
 
 
 class WorkerOwnershipTests(FakeSdkFixture):
+    def test_windows_exit_probe_is_passive_and_fails_closed(self):
+        import ctypes
+
+        kernel = mock.Mock()
+        kernel.OpenProcess.return_value = 0x123456789
+        kernel.CloseHandle.return_value = True
+        with mock.patch.object(ctypes, "WinDLL", return_value=kernel, create=True), \
+                mock.patch.object(ctypes, "get_last_error", return_value=5, create=True) as last_error, \
+                mock.patch.object(ctypes, "WinError", side_effect=lambda code: OSError(code, "fixture Windows error"), create=True), \
+                mock.patch.object(os, "kill", side_effect=AssertionError("exit probe must not signal")):
+            kernel.WaitForSingleObject.return_value = 0x102
+            with mock.patch.object(os, "name", "nt"):
+                with self.assertRaises(AssertionError):
+                    self.assert_pid_stopped(1234)
+            kernel.OpenProcess.assert_called_once_with(0x00100000, False, 1234)
+            kernel.WaitForSingleObject.assert_called_once_with(0x123456789, 4000)
+            kernel.CloseHandle.assert_called_once_with(0x123456789)
+            # WAIT_OBJECT_0, not a PID lookup alone, proves the held process exited.
+            kernel.WaitForSingleObject.return_value = 0
+            with mock.patch.object(os, "name", "nt"):
+                self.assert_pid_stopped(1234)
+            kernel.WaitForSingleObject.return_value = 0xFFFFFFFF
+            with self.assertRaises(OSError):
+                _windows_pid_stopped(1234)
+            self.assertEqual(kernel.CloseHandle.call_count, 3, "failed wait leaked a handle")
+            kernel.OpenProcess.return_value = None
+            last_error.return_value = 87
+            self.assertTrue(_windows_pid_stopped(1234), "missing PID was not treated as stopped")
+            self.assertEqual(kernel.WaitForSingleObject.call_count, 3)
+            self.assertEqual(kernel.CloseHandle.call_count, 3)
+            last_error.return_value = 5
+            with self.assertRaises(OSError):
+                _windows_pid_stopped(1234)
+            kernel.OpenProcess.return_value = 0x123456789
+            kernel.WaitForSingleObject.return_value = 0
+            kernel.CloseHandle.return_value = False
+            with self.assertRaises(OSError):
+                _windows_pid_stopped(1234)
+            kernel.TerminateProcess.assert_not_called()
+            kernel.GenerateConsoleCtrlEvent.assert_not_called()
+
     def assert_pid_stopped(self, pid):
+        if os.name == "nt":
+            self.assertTrue(_windows_pid_stopped(pid), f"Owned fixture child {pid} is still running")
+            return
         # A killed process can remain a zombie until its platform parent reaps it.
         deadline = time.monotonic() + 4
         while time.monotonic() < deadline:
@@ -438,6 +526,9 @@ class WorkerOwnershipTests(FakeSdkFixture):
         sibling = subprocess.Popen([sys.executable, "-I", "-B", "-c", "import time; time.sleep(30)"],
                                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
+            if os.name == "nt":
+                self.assertFalse(_windows_pid_stopped(sibling.pid, timeout_ms=0))
+                self.assertIsNone(sibling.poll(), "Passive Windows query must not terminate a live process")
             code, result = self.invoke(fake_mode="child-hang", timeout=0.7)
             self.assertEqual(124, code, result)
             self.assertIsNone(sibling.poll(), "Cleanup must not select processes by executable name")

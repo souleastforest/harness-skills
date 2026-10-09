@@ -12,11 +12,14 @@ profile is needed. All scenario files live under the checkout's ignored state.
 from __future__ import annotations
 
 import argparse
+import ast
+from contextlib import redirect_stderr, redirect_stdout
 import hashlib
 import importlib.util
 import json
 import os
 import platform
+import re
 import shutil
 import sys
 import tempfile
@@ -30,6 +33,23 @@ SKILL = TESTS.parent
 CHECKOUT = SKILL.parent
 STATE_NAME = ".dsh-invoker-profile"
 VERSION = "0.1.5rc1"
+TEST_MODULES = (
+    "test_bootstrap", "test_ci_smoke", "test_invoker", "test_invoker_regressions",
+    "test_invoker_sdk", "test_runtime_integration", "test_windows_encoding",
+)
+COUNT_KEYS = ("tests", "failures", "errors", "skipped", "expected_failures", "unexpected_successes")
+MAX_TEST_ID = 256
+MAX_DIAGNOSTIC = 64 * 1024
+BOOTSTRAP_ACTIONS = frozenset(("check", "setup", "exec"))
+# Literal codes from the two native bootstrap entrypoints and their validator.
+# Never forward their messages, paths, exception strings or other envelope data.
+BOOTSTRAP_ERROR_CODES = frozenset((
+    "arguments", "bootstrap_failed", "bootstrap_tool", "existing_venv", "filesystem", "hash_tool",
+    "incomplete_runtime", "powershell_version", "project_root", "python_install", "release_metadata",
+    "runtime_busy", "runtime_interpreter", "runtime_manifest", "runtime_missing", "runtime_validation",
+    "runtime_version", "script_path", "sdk_install", "unowned_runtime", "unsafe_path", "unsupported_platform",
+    "uv_archive", "uv_capability", "uv_digest", "uv_download", "uv_version", "venv_create",
+))
 
 # Import our test infrastructure, not another SDK/protocol implementation.
 _spec = importlib.util.spec_from_file_location("dsh_ci_native_test_support", TESTS / "test_runtime_integration.py")
@@ -40,9 +60,152 @@ sys.modules[_spec.name] = _support
 _spec.loader.exec_module(_support)
 
 
+class VerificationError(RuntimeError):
+    """Only fixed driver messages and validated diagnostics may be public."""
+
+
 def require(condition: bool, message: str) -> None:
     if not condition:
-        raise RuntimeError(message)
+        raise VerificationError(message)
+
+
+def allowed_test_ids(lane: str) -> frozenset[str]:
+    """Build IDs from trusted source identifiers, never test descriptions/data."""
+    identifiers = set()
+    for module in TEST_MODULES:
+        if (module == "test_runtime_integration") != (lane == "native"):
+            continue
+        tree = ast.parse((TESTS / (module + ".py")).read_text(encoding="utf-8"))
+        identifiers.add("unittest.loader._FailedTest." + module)
+        for phase in ("setUpModule", "tearDownModule"):
+            identifiers.add(f"{phase} ({module})")
+        for node in tree.body:
+            if isinstance(node, ast.ClassDef):
+                for phase in ("setUpClass", "tearDownClass"):
+                    identifiers.add(f"{phase} ({module}.{node.name})")
+                for method in node.body:
+                    if isinstance(method, ast.FunctionDef) and method.name.startswith("test_"):
+                        identifiers.add(f"{module}.{node.name}.{method.name}")
+    return frozenset(identifier for identifier in identifiers if valid_test_id(identifier, identifiers))
+
+
+def valid_test_id(identifier: Any, allowed: Any) -> bool:
+    return (
+        isinstance(identifier, str) and len(identifier) <= MAX_TEST_ID
+        and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_. ()]*", identifier) is not None
+        and identifier in allowed
+    )
+
+
+def lane_succeeded(lane: str, counts: dict[str, int]) -> bool:
+    return (
+        counts["tests"] > 0 and counts["failures"] == counts["errors"] == counts["unexpected_successes"] == 0
+        and (lane != "native" or counts["skipped"] == 0)
+    )
+
+
+class SafeTestResult(unittest.TestResult):
+    """Count outcomes without retaining exceptions, tracebacks or skip reasons."""
+
+    def __init__(self, lane: str, allowed: frozenset[str]) -> None:
+        super().__init__()
+        self.lane = lane
+        self.allowed = allowed
+        self.counts = dict.fromkeys(COUNT_KEYS, 0)
+        self.failed_test_ids: set[str] = set()
+
+    def record(self, outcome: str, test: Any) -> None:
+        self.counts[outcome] += 1
+        identifier = test.id()
+        if valid_test_id(identifier, self.allowed):
+            self.failed_test_ids.add(identifier)
+
+    def addFailure(self, test: Any, err: Any) -> None:
+        self.record("failures", test)
+
+    def addError(self, test: Any, err: Any) -> None:
+        self.record("errors", test)
+
+    def addSubTest(self, test: Any, subtest: Any, err: Any) -> None:
+        if err is not None:
+            # The parent ID is source-defined; subtest IDs may embed HTTP data.
+            self.record("failures" if issubclass(err[0], test.failureException) else "errors", test)
+
+    def addSkip(self, test: Any, reason: Any) -> None:
+        if self.lane == "native":
+            self.record("skipped", test)
+        else:
+            self.counts["skipped"] += 1
+
+    def addExpectedFailure(self, test: Any, err: Any) -> None:
+        self.counts["expected_failures"] += 1
+
+    def addUnexpectedSuccess(self, test: Any) -> None:
+        self.record("unexpected_successes", test)
+
+    def wasSuccessful(self) -> bool:
+        return lane_succeeded(self.lane, {**self.counts, "tests": self.testsRun})
+
+    def diagnostic(self) -> dict[str, Any]:
+        return {
+            "schema_version": 1, "kind": "unittest", "lane": self.lane, "ok": self.wasSuccessful(),
+            "counts": {**self.counts, "tests": self.testsRun}, "failed_test_ids": sorted(self.failed_test_ids),
+        }
+
+
+def run_suite(suite: unittest.TestSuite, lane: str) -> dict[str, Any]:
+    result = SafeTestResult(lane, allowed_test_ids(lane))
+    # Discard, do not capture, test prints/warnings. The result never formats err.
+    with open(os.devnull, "w", encoding="utf-8") as sink, redirect_stdout(sink), redirect_stderr(sink):
+        suite.run(result)
+    return result.diagnostic()
+
+
+def diagnostic_object(text: str) -> dict[str, Any] | None:
+    if len(text) > MAX_DIAGNOSTIC:
+        return None
+    try:
+        value = json.loads(text)
+    except (ValueError, TypeError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def unittest_diagnostic(text: str, lane: str) -> dict[str, Any] | None:
+    value = diagnostic_object(text)
+    if value is None or value.get("schema_version") != 1 or value.get("kind") != "unittest" or value.get("lane") != lane:
+        return None
+    counts = value.get("counts")
+    if not isinstance(counts, dict) or set(counts) != set(COUNT_KEYS):
+        return None
+    if any(type(count) is not int or not 0 <= count <= 100_000 for count in counts.values()):
+        return None
+    identifiers = value.get("failed_test_ids")
+    allowed = allowed_test_ids(lane)
+    if not isinstance(identifiers, list) or len(identifiers) > len(allowed):
+        return None
+    if any(not valid_test_id(identifier, allowed) for identifier in identifiers):
+        return None
+    ok = lane_succeeded(lane, counts)
+    if value.get("ok") is not ok:
+        return None
+    return {
+        "schema_version": 1, "kind": "unittest", "lane": lane, "ok": ok,
+        "counts": counts, "failed_test_ids": sorted(set(identifiers)),
+    }
+
+
+def bootstrap_diagnostic(stdout: str, stderr: str, action: str) -> dict[str, Any] | None:
+    if action not in BOOTSTRAP_ACTIONS:
+        return None
+    for text in (stderr, stdout):
+        value = diagnostic_object(text)
+        if value is None or value.get("ok") is not False or value.get("action", action) != action:
+            continue
+        code = value.get("error", value.get("code"))
+        if isinstance(code, str) and code in BOOTSTRAP_ERROR_CODES:
+            return {"kind": "bootstrap", "action": action, "error": code}
+    return None
 
 
 def digest(path: Path) -> str:
@@ -86,13 +249,18 @@ def bootstrap_command(action: str, root: Path, python_args: list[str] | None = N
 
 def run_command(
     command: list[str], *, environment: dict[str, str], cwd: Path, timeout: float, label: str,
+    lane: str | None = None, action: str | None = None,
 ) -> Any:
     result = _support.run_owned(command, cwd=cwd, env=environment, timeout=timeout)
     require(not result.timed_out, f"independent CI wall-clock watchdog fired: {label}")
     if result.returncode != 0:
-        # A failing unittest traceback may render unexpected captured data.
-        # Withhold it just like raw bootstrap/SDK/HTTP diagnostics.
-        raise RuntimeError(f"{label} failed (exit {result.returncode}); raw tool/runtime diagnostics withheld")
+        # Failed children can contain secrets, including unittest assertion data.
+        # Only reconstruct source-allowlisted IDs/counts or literal bootstrap codes.
+        diagnostic = unittest_diagnostic(result.stdout, lane) if lane is not None else None
+        if diagnostic is None and action is not None:
+            diagnostic = bootstrap_diagnostic(result.stdout, result.stderr, action)
+        safe = "" if diagnostic is None else "; safe diagnostic=" + json.dumps(diagnostic, ensure_ascii=True, sort_keys=True)
+        raise VerificationError(f"{label} failed (exit {result.returncode}); raw tool/runtime diagnostics withheld{safe}")
     return result
 
 
@@ -154,19 +322,20 @@ def run_lane(lane: str, root: Path) -> int:
     require(sys.version_info[:2] == (3, 12), "CI requires managed Python 3.12")
     if lane == "native":
         require(os.environ.get("DSH_INVOKER_REQUIRE_RUNTIME") == "1", "native runtime lane must be REQUIRED")
-    suite = suite_for(lane)
-    result = unittest.TextTestRunner(verbosity=2).run(suite)
-    if lane == "native" and result.skipped:
-        raise RuntimeError("REQUIRED native runtime tests silently skipped")
-    require(result.testsRun > 0, f"{lane} lane executed no tests")
-    return 0 if result.wasSuccessful() else 1
+    # Discovery/import failures are TestResult errors, not raw loader tracebacks.
+    with open(os.devnull, "w", encoding="utf-8") as sink, redirect_stdout(sink), redirect_stderr(sink):
+        suite = suite_for(lane)
+    diagnostic = run_suite(suite, lane)
+    print(json.dumps(diagnostic, ensure_ascii=True, sort_keys=True))
+    return 0 if diagnostic["ok"] else 1
 
 
 def run_tests(root: Path, environment: dict[str, str], lane: str) -> None:
     command = bootstrap_command("exec", root, [str(Path(__file__).resolve()), "--lane", lane, "--project-root", str(root)])
-    result = run_command(command, environment=environment, cwd=root, timeout=240, label=f"{lane} tests")
-    print(result.stdout, end="")
-    print(result.stderr, end="", file=sys.stderr)
+    result = run_command(command, environment=environment, cwd=root, timeout=240, label=f"{lane} tests", lane=lane, action="exec")
+    diagnostic = unittest_diagnostic(result.stdout, lane)
+    require(diagnostic is not None and diagnostic["ok"], f"{lane} tests did not emit a successful safe diagnostic")
+    print(json.dumps(diagnostic, ensure_ascii=True, sort_keys=True))
 
 
 def controlled_no_uv_path(directory: Path, environment: dict[str, str]) -> str:
@@ -192,6 +361,18 @@ def controlled_no_uv_path(directory: Path, environment: dict[str, str]) -> str:
         for name in utility_names:
             source = next((Path(prefix) / name for prefix in ("/usr/bin", "/bin", "/usr/sbin", "/sbin") if (Path(prefix) / name).is_file()), None)
             if source is not None:
+                if name == "shasum" and sys.platform == "darwin":
+                    # Apple's /usr/bin/perl dispatcher cannot be relocated with
+                    # shasum. Use an adjacent native script with its own absolute
+                    # versioned shebang, without adding any system dir to PATH.
+                    for sibling in sorted(source.parent.glob("shasum[0-9]*"), reverse=True):
+                        if not re.fullmatch(r"shasum[0-9]+\.[0-9]+(?:\.[0-9]+)?", sibling.name) or not sibling.is_file():
+                            continue
+                        with sibling.open("rb") as handle:
+                            shebang = handle.readline(128)
+                        if re.fullmatch(rb"#!/usr/bin/perl[0-9]+\.[0-9]+(?:\.[0-9]+)?\n", shebang) and Path(os.fsdecode(shebang[2:].strip())).is_file():
+                            source = sibling
+                            break
                 (directory / name).symlink_to(source)
         controlled = str(directory)
     for name in ("uv", "uv.exe", "uv.cmd", "uv.bat"):
@@ -240,11 +421,11 @@ def drive(args: argparse.Namespace) -> int:
         verify_absence_in_native_shell(absent_environment, absent_root)
         state = absent_root / STATE_NAME
         require(not state.exists(), "absent-uv scenario already had a state/toolchain directory")
-        check = run_command(bootstrap_command("check", absent_root), environment=absent_environment, cwd=absent_root, timeout=20, label="shell-only check without uv")
+        check = run_command(bootstrap_command("check", absent_root), environment=absent_environment, cwd=absent_root, timeout=20, label="shell-only check without uv", action="check")
         value = read_object(check.stdout, "bootstrap check")
         require(value.get("uv", {}).get("source") == "absent" and value.get("uv", {}).get("path") is None, "bootstrap check did not report genuinely absent uv")
         require(not state.exists(), "read-only shell check wrote the state directory")
-        setup = run_command(bootstrap_command("setup", absent_root), environment=absent_environment, cwd=absent_root, timeout=420, label="real absent-uv bootstrap")
+        setup = run_command(bootstrap_command("setup", absent_root), environment=absent_environment, cwd=absent_root, timeout=420, label="real absent-uv bootstrap", action="setup")
         value = read_object(setup.stdout, "bootstrap setup")
         local_uv = Path(value.get("uv", {}).get("path", ""))
         require(value.get("uv", {}).get("version") == "0.12.24", "bootstrap did not use fixed uv 0.12.24")
@@ -282,6 +463,9 @@ def main() -> int:
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
-    except Exception as error:
+    except VerificationError as error:
         print(f"CI verification failed: {error}", file=sys.stderr)
+        raise SystemExit(1)
+    except Exception:
+        print("CI verification failed; unexpected raw diagnostics withheld", file=sys.stderr)
         raise SystemExit(1)

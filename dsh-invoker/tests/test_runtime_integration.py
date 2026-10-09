@@ -20,6 +20,7 @@ import ctypes
 import importlib.metadata
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -57,7 +58,8 @@ FIXTURE_STAGES = frozenset((
 EXCEPTION_TYPES = frozenset((
     "AssertionError", "NativeCommandFailure", "RuntimeError", "ValueError", "TypeError", "TimeoutError", "OSError",
     "FileNotFoundError", "PermissionError", "ImportError", "ModuleNotFoundError", "TimeoutExpired",
-    "JsonRpcError", "ValidationError", "JSONDecodeError", "KeyError", "AttributeError", "UnicodeError", "UnicodeDecodeError",
+    "JsonRpcError", "TransportClosedError", "SdkProtocolError", "ValidationError", "JSONDecodeError", "KeyError", "AttributeError",
+    "UnicodeError", "UnicodeDecodeError", "UnicodeEncodeError",
     "HarnessError", "HarnessTimeoutError", "HarnessProcessError", "HarnessProtocolError",
 ))
 HELPER_ERROR_CODES = frozenset((
@@ -68,6 +70,44 @@ HELPER_ERROR_CODES = frozenset((
     "INVALID_PROMPT", "INVALID_PATCH", "INVALID_PRIVACY_PATCH", "INVALID_MODEL_OPTION", "INVALID_TIMEOUT",
     "INVALID_SESSION_ID", "INVALID_WORKER_REQUEST", "INVOCATION_DEADLINE", "IO_OR_STATE_FAILURE",
 ))
+RPC_ERROR_CODES = frozenset((-32601, -32603))
+FIXTURE_FAILURE_CATEGORIES = frozenset(("loader-settlement", "initialize-parameters", "model-resolution", "unknown"))
+# dsh-v0.1.5-rc.1 packages/sdk/server/src/index.ts awaits Loader BEFORE
+# server.ts initialize parameter validation / LLM model resolution. Both paths
+# become -32603 in packages/sdk/protocol/src/transport.ts; the RPC code alone
+# cannot identify a cause. Match only these exact pinned-source messages, never
+# forward the message, structured data, or appended SDK runtime diagnostics.
+_INITIALIZE_FAILURE_CATEGORIES = {
+    "loader fibers failed": "loader-settlement",  # vendor/loader/src/config/tree.ts
+    "initialize reasoningEffort must be a non-empty string": "initialize-parameters",
+    "initialize maxTokens must be a positive safe integer": "initialize-parameters",
+    'no adapter registered for provider "deepseek-official"': "model-resolution",
+    'adapter returned invalid exact model metadata for provider "deepseek-official" model "ci-mock-model"': "model-resolution",
+    'adapter returned invalid context metadata for provider "deepseek-official" model "ci-mock-model"': "model-resolution",
+}
+
+
+def fixture_failure_diagnostic(error: Exception, diagnostic: dict[str, Any]) -> dict[str, Any]:
+    """Classify a native initialization failure without serializing any SDK text."""
+    value: dict[str, Any] = {"fixture_failed": True, "failure_category": "unknown"}
+    kind = type(error).__name__
+    if kind in EXCEPTION_TYPES:
+        value["error_type"] = kind
+    stage = diagnostic.get("fixture_stage")
+    if type(stage) is str and stage in FIXTURE_STAGES:
+        value["fixture_stage"] = stage
+    if kind == "JsonRpcError":
+        fields = vars(error)
+        code = fields.get("code")
+        if type(code) is int and code in RPC_ERROR_CODES:
+            value["rpc_code"] = code
+        message = fields.get("message")
+        if (type(code) is int and code == -32603 and stage in ("initialize", "harness-enter")
+                and type(message) is str and len(message) <= 64 * 1024):
+            # initialize() may append stderr after the wire message. Do not scan
+            # those later lines: a log mention is not evidence of the RPC cause.
+            value["failure_category"] = _INITIALIZE_FAILURE_CATEGORIES.get(message.partition("\n")[0], "unknown")
+    return value
 
 
 def command_diagnostic(returncode: Any, timed_out: bool, stdout: bytes | str = b"", stderr: bytes | str = b"") -> dict[str, Any]:
@@ -95,6 +135,12 @@ def command_diagnostic(returncode: Any, timed_out: bool, stdout: bytes | str = b
                 value["child_exception"] = kind
             if isinstance(stage, str) and stage in FIXTURE_STAGES:
                 value["fixture_stage"] = stage
+            code = envelope.get("rpc_code")
+            if type(code) is int and code in RPC_ERROR_CODES:
+                value["rpc_code"] = code
+            category = envelope.get("failure_category")
+            if type(category) is str and category in FIXTURE_FAILURE_CATEGORIES:
+                value["failure_category"] = category
     return value
 
 
@@ -1079,11 +1125,6 @@ if __name__ == "__main__":
             raise SystemExit(_native_child(sys.argv[2], sys.argv[3], diagnostic))
         except Exception as error:
             # Emit only literal allowlisted fields, never arbitrary SDK text.
-            value: dict[str, Any] = {"fixture_failed": True}
-            if type(error).__name__ in EXCEPTION_TYPES:
-                value["error_type"] = type(error).__name__
-            if diagnostic.get("fixture_stage") in FIXTURE_STAGES:
-                value["fixture_stage"] = diagnostic["fixture_stage"]
-            print(json.dumps(value), file=sys.stderr)
+            print(json.dumps(fixture_failure_diagnostic(error, diagnostic)), file=sys.stderr)
             raise SystemExit(1)
     unittest.main()

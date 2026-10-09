@@ -136,11 +136,15 @@ def native_failure_diagnostic(value: Any, allowed: frozenset[str]) -> dict[str, 
     safe = {key: value[key] for key in ("test_id", "exception", "site", "line")}
     for field, codes in (("stage", NATIVE_STAGES), ("process_stage", _support.PROCESS_STAGES),
                          ("fixture_stage", _support.FIXTURE_STAGES), ("helper_error", NATIVE_HELPER_ERRORS),
-                         ("child_exception", NATIVE_EXCEPTIONS)):
+                         ("child_exception", NATIVE_EXCEPTIONS), ("failure_category", _support.FIXTURE_FAILURE_CATEGORIES)):
         if field in value:
             if type(value[field]) is not str or value[field] not in codes:
                 return None
             safe[field] = value[field]
+    if "rpc_code" in value:
+        if type(value["rpc_code"]) is not int or value["rpc_code"] not in _support.RPC_ERROR_CODES:
+            return None
+        safe["rpc_code"] = value["rpc_code"]
     if "returncode" in value:
         code = value["returncode"]
         if type(code) is not int or not -(2**31) <= code < 2**32:
@@ -180,6 +184,7 @@ class SafeTestResult(unittest.TestResult):
                 # Reconstruct known keys only; never preserve raw attributes.
                 value.update({key: command[key] for key in (
                     "stage", "process_stage", "returncode", "timed_out", "helper_error", "child_exception", "fixture_stage",
+                    "rpc_code", "failure_category",
                 ) if key in command})
         safe = native_failure_diagnostic(value, self.allowed)
         if safe is not None and safe not in self.native_failures and len(self.native_failures) < len(self.allowed):

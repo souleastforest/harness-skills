@@ -260,6 +260,104 @@ class CiSmokeTests(unittest.TestCase):
                 self.assertNotIn(SECRET, json.dumps(safe))
                 self.assertNotIn("child_exception", safe)
 
+    def test_native_initialize_categories_withhold_private_sdk_details(self):
+        # No SDK import/process/provider request: simulate the installed error's
+        # public fields, including the private data/stderr initialize can append.
+        error_type = type("JsonRpcError", (RuntimeError,), {})
+        signatures = (
+            ("loader fibers failed", "loader-settlement"),
+            ("initialize reasoningEffort must be a non-empty string", "initialize-parameters"),
+            ("initialize maxTokens must be a positive safe integer", "initialize-parameters"),
+            ('no adapter registered for provider "deepseek-official"', "model-resolution"),
+            ('adapter returned invalid exact model metadata for provider "deepseek-official" model "ci-mock-model"', "model-resolution"),
+            ('adapter returned invalid context metadata for provider "deepseek-official" model "ci-mock-model"', "model-resolution"),
+        )
+        for stage in ("initialize", "harness-enter"):
+            for message, category in signatures:
+                with self.subTest(stage=stage, category=category):
+                    error = error_type(SECRET)
+                    error.code = -32603
+                    error.message = message + "\n" + SECRET
+                    error.data = {"private": SECRET, "path": SECRET}
+                    envelope = ci._support.fixture_failure_diagnostic(error, {"fixture_stage": stage, "private": SECRET})
+                    self.assertEqual(envelope, {
+                        "fixture_failed": True, "error_type": "JsonRpcError", "fixture_stage": stage,
+                        "failure_category": category, "rpc_code": -32603,
+                    })
+                    self.assertNotIn(SECRET, json.dumps(envelope))
+                    result = self.owned_result("", json.dumps({**envelope, "message": SECRET, "data": error.data}), returncode=1)
+                    def command_failure(case):
+                        case.assert_owned_success(result, stage="lifecycle")
+
+                    diagnostic = ci.run_suite(self.native_suite(command_failure), "native")
+                    self.assertFalse(diagnostic["ok"])
+                    detail = diagnostic["native_failures"][0]
+                    self.assertEqual(detail["failure_category"], category)
+                    self.assertEqual(detail["rpc_code"], -32603)
+                    self.assertEqual(detail["fixture_stage"], stage)
+                    self.assertNotIn(SECRET, json.dumps(diagnostic))
+                    public = self.command_failure(self.owned_result(json.dumps(diagnostic), SECRET), lane="native")
+                    self.assertIn('"failure_category": "' + category + '"', public)
+                    self.assertIn('"rpc_code": -32603', public)
+                    for field in ("message", "data", "private", "path"):
+                        self.assertNotIn('"' + field + '"', public)
+
+    def test_native_initialize_unknowns_do_not_imply_a_failure_cause(self):
+        error_type = type("JsonRpcError", (RuntimeError,), {})
+        for code, stage, message in (
+            (-32603, "initialize", SECRET),
+            (-32603, "initialize", SECRET + "\nloader fibers failed"),
+            (-32603, "initialize", "loader fibers failed " + SECRET),
+            (-32603, "initialize", SECRET + "x" * ci.MAX_DIAGNOSTIC),
+            (-32603, "initialize", ["loader fibers failed"]),
+            (-32603, "initialize", {"message": "loader fibers failed"}),
+            (-32601, "initialize", "loader fibers failed"),
+            (-32603, "restore-request", "loader fibers failed"),
+            (-32603, "runtime-resolve", "initialize maxTokens must be a positive safe integer"),
+            (-32603, "initialize", 'no adapter registered for provider "' + SECRET + '"'),
+            (-32603, "initialize", 'adapter returned invalid context metadata for provider "deepseek-official" model "' + SECRET + '"'),
+        ):
+            with self.subTest(code=code, stage=stage, kind=type(message).__name__):
+                error = error_type(SECRET)
+                error.code, error.message, error.data = code, message, {"private": SECRET}
+                envelope = ci._support.fixture_failure_diagnostic(error, {"fixture_stage": stage})
+                self.assertEqual(envelope["failure_category"], "unknown")
+                self.assertEqual(envelope["rpc_code"], code)
+                self.assertNotIn(SECRET, json.dumps(envelope))
+        error = TimeoutError(SECRET + "\nloader fibers failed")
+        envelope = ci._support.fixture_failure_diagnostic(error, {"fixture_stage": "harness-enter"})
+        self.assertEqual(envelope, {
+            "fixture_failed": True, "error_type": "TimeoutError", "fixture_stage": "harness-enter",
+            "failure_category": "unknown",
+        })
+        self.assertNotIn(SECRET, json.dumps(envelope))
+
+    def test_native_rpc_codes_and_categories_are_strictly_allowlisted(self):
+        error_type = type("JsonRpcError", (RuntimeError,), {})
+        for code in (-32601, -32603, -32700, -32602, 5, True, -2**31 - 1, 2**32, SECRET, [], {}):
+            with self.subTest(kind=type(code).__name__):
+                error = error_type(SECRET)
+                error.code, error.message = code, "loader fibers failed"
+                envelope = ci._support.fixture_failure_diagnostic(error, {"fixture_stage": "initialize"})
+                allowed = type(code) is int and code in ci._support.RPC_ERROR_CODES
+                self.assertEqual("rpc_code" in envelope, allowed)
+                if allowed:
+                    self.assertEqual(envelope["rpc_code"], code)
+                else:
+                    self.assertEqual(envelope["failure_category"], "unknown")
+                self.assertNotIn(SECRET, json.dumps(envelope))
+        for code in (-32601, -32603):
+            for category in ci._support.FIXTURE_FAILURE_CATEGORIES:
+                envelope = {"fixture_failed": True, "rpc_code": code, "failure_category": category, "private": SECRET}
+                self.assertEqual(ci._support.command_diagnostic(1, False, "", json.dumps(envelope)), {
+                    "returncode": 1, "timed_out": False, "rpc_code": code, "failure_category": category,
+                })
+        for code, category in ((True, SECRET), (-32602, []), (SECRET, {}), ([], 1), ({}, None)):
+            envelope = {"fixture_failed": True, "rpc_code": code, "failure_category": category}
+            self.assertEqual(ci._support.command_diagnostic(1, False, "", json.dumps(envelope)), {
+                "returncode": 1, "timed_out": False,
+            })
+
     def test_native_assertion_sites_and_cleanup_errors_preserve_outcomes(self):
         # Use real checked-in methods as traceback sites; never publish the
         # exception string (which intentionally contains private data here).
@@ -350,6 +448,8 @@ class CiSmokeTests(unittest.TestCase):
             ("stage", []), ("returncode", True), ("returncode", 2**32), ("timed_out", 1),
             ("line", True), ("line", -1), ("line", 10**9), ("process_stage", SECRET), ("process_stage", []),
             ("fixture_stage", SECRET), ("fixture_stage", {}),
+            ("failure_category", SECRET), ("failure_category", []), ("failure_category", {}),
+            ("rpc_code", True), ("rpc_code", -32602), ("rpc_code", SECRET), ("rpc_code", []), ("rpc_code", {}),
         ):
             with self.subTest(field=field, kind=type(invalid).__name__):
                 rejected = {**detail, field: invalid}

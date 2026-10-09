@@ -1,0 +1,4 @@
+interface:
+  display_name: "DSH 任务委派与初始化"
+  short_description: "通过官方 DSH SDK 委派任务，逐步引导初始化与故障诊断"
+  default_prompt: "请用 $dsh-invoker 帮我委派 DSH 任务或逐步初始化/诊断：先只读检查；首次先确认 home/profile 再单独确认依赖安装；每轮只问一个当前卡点并等待真实答复，复用有效绑定，仅执行已授权范围。"

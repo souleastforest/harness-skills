@@ -1,0 +1,135 @@
+name: dsh-invoker native runtime
+
+on:
+  pull_request:
+    paths:
+      - 'dsh-invoker/**'
+      - '.github/workflows/dsh-invoker.yml'
+  push:
+    # Feature branches run through pull_request, avoiding duplicate jobs.
+    branches: [main]
+    paths:
+      - 'dsh-invoker/**'
+      - '.github/workflows/dsh-invoker.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dsh-invoker-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native:
+    name: ${{ matrix.label }} / uv reuse + absent
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            label: Linux x64
+            os: Linux
+            arch: x64
+          - runner: windows-2022
+            label: Windows x64 (pwsh)
+            os: Windows
+            arch: x64
+          # macos-14 is currently ARM64 for standard public/private runners.
+          # The driver also checks platform.machine(); never mislabel Intel.
+          - runner: macos-14
+            label: macOS 14 ARM64
+            os: macOS
+            arch: arm64
+    env:
+      DSH_RUNTIME_MODE: exe
+      DSH_TELEMETRY_DISABLED: '1'
+      # REQUIRED native tests may never silently skip missing/wrong wheels.
+      DSH_INVOKER_REQUIRE_RUNTIME: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONUTF8: '1'
+
+    steps:
+      - name: Check out source without persistent credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Supply fixed existing uv without caching personal state
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: '0.12.24'
+          enable-cache: false
+          # Do not create/activate an environment or install Python here.
+          cache-local-path: ${{ github.workspace }}/.dsh-invoker-profile/action-cache
+
+      - name: Native POSIX check, setup, units and required loopback runtime
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          EXPECTED_OS: ${{ matrix.os }}
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          root="$GITHUB_WORKSPACE/.dsh-invoker-profile/ci-scenarios/existing uv 项目"
+          mkdir -p "$root/os home" "$root/bootstrap tmp"
+          uv_path="$(command -v uv)"
+          case "$uv_path" in /*) ;; *) printf '%s\n' 'uv path must be absolute' >&2; exit 1 ;; esac
+          export HOME="$root/os home"
+          export USERPROFILE="$HOME"
+          export XDG_CONFIG_HOME="$HOME/.config"
+          export XDG_CACHE_HOME="$HOME/.cache"
+          export XDG_DATA_HOME="$HOME/.local/share"
+          export XDG_STATE_HOME="$HOME/.local/state"
+          export TMPDIR="$root/bootstrap tmp" TMP="$root/bootstrap tmp" TEMP="$root/bootstrap tmp"
+          export DSH_HOME="$root/unused disposable home"
+          unset DEEPSEEK_API_KEY DEEPSEEK_BASE_URL DSH_PERMISSION_MODE DSH_BIN NODE_OPTIONS || true
+          bash "$GITHUB_WORKSPACE/dsh-invoker/scripts/bootstrap.sh" check --project-root "$root"
+          test ! -e "$root/.dsh-invoker-profile"
+          bash "$GITHUB_WORKSPACE/dsh-invoker/scripts/bootstrap.sh" setup --project-root "$root"
+          bash "$GITHUB_WORKSPACE/dsh-invoker/scripts/bootstrap.sh" exec --project-root "$root" -- \
+            "$GITHUB_WORKSPACE/dsh-invoker/tests/ci_smoke.py" \
+            --project-root "$root" --uv-path "$uv_path" \
+            --expected-os "$EXPECTED_OS" --expected-arch "$EXPECTED_ARCH"
+
+      - name: Native PowerShell check, setup, units and required loopback runtime
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          EXPECTED_OS: ${{ matrix.os }}
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:GITHUB_WORKSPACE '.dsh-invoker-profile/ci-scenarios/existing uv 项目'
+          $osHome = Join-Path $root 'os home'
+          $temp = Join-Path $root 'bootstrap tmp'
+          New-Item -ItemType Directory -Path $osHome, $temp -Force | Out-Null
+          $uvPath = (Get-Command uv -CommandType Application -ErrorAction Stop).Source
+          if (-not [IO.Path]::IsPathRooted($uvPath)) { throw 'uv path must be absolute' }
+          $env:HOME = $osHome
+          $env:USERPROFILE = $osHome
+          $env:APPDATA = Join-Path $osHome 'AppData/Roaming'
+          $env:LOCALAPPDATA = Join-Path $osHome 'AppData/Local'
+          $env:TMP = $temp
+          $env:TEMP = $temp
+          $env:TMPDIR = $temp
+          $env:DSH_HOME = Join-Path $root 'unused disposable home'
+          foreach ($name in @('DEEPSEEK_API_KEY','DEEPSEEK_BASE_URL','DSH_PERMISSION_MODE','DSH_BIN','NODE_OPTIONS')) {
+            Remove-Item "Env:$name" -ErrorAction SilentlyContinue
+          }
+          $bootstrap = Join-Path $env:GITHUB_WORKSPACE 'dsh-invoker/scripts/bootstrap.ps1'
+          & $bootstrap -Action check -ProjectRoot $root
+          if ($LASTEXITCODE -ne 0) { throw 'Read-only shell check failed' }
+          if (Test-Path -LiteralPath (Join-Path $root '.dsh-invoker-profile')) { throw 'Read-only check wrote state' }
+          & $bootstrap -Action setup -ProjectRoot $root
+          if ($LASTEXITCODE -ne 0) { throw 'Existing-uv setup failed' }
+          $driver = Join-Path $env:GITHUB_WORKSPACE 'dsh-invoker/tests/ci_smoke.py'
+          & $bootstrap -Action exec -ProjectRoot $root -PythonArgs @(
+            $driver, '--project-root', $root, '--uv-path', $uvPath,
+            '--expected-os', $env:EXPECTED_OS, '--expected-arch', $env:EXPECTED_ARCH
+          )
+          if ($LASTEXITCODE -ne 0) { throw 'Native unit/runtime/absent-uv verification failed' }
+
+      # Deliberately no artifact/cache step for DSH homes, session JSONL,
+      # complete requests, credentials, or raw runtime logs.

@@ -6,6 +6,7 @@
 ## 选择技能
 
 - [reader-first-technical-docs](reader-first-technical-docs/SKILL.md)：把技术文档整理成读者能理解和实践的教程、概念说明与查询参考。行文方法参考 DSH Cordis 教程。
+- [dsh-invoker](dsh-invoker/README.md)：通过 DeepSeek Harness Python SDK 委派任务，逐步引导初始化与调用诊断。
 - [two-way-steelman](two-way-steelman/SKILL.md)：双向钢人化分析。
 
 ## 下载写作技能

@@ -145,6 +145,13 @@ def native_failure_diagnostic(value: Any, allowed: frozenset[str]) -> dict[str, 
         if type(value["rpc_code"]) is not int or value["rpc_code"] not in _support.RPC_ERROR_CODES:
             return None
         safe["rpc_code"] = value["rpc_code"]
+    loader_keys = set(_support.LOADER_DIAGNOSTIC_FIELDS) & value.keys()
+    if loader_keys:
+        loader = _support.loader_failure_fields(value)
+        if (set(loader) != loader_keys or value.get("failure_category") != "loader-settlement"
+                or value.get("rpc_code") != -32603 or value.get("fixture_stage") not in ("initialize", "harness-enter")):
+            return None
+        safe.update(loader)
     if "returncode" in value:
         code = value["returncode"]
         if type(code) is not int or not -(2**31) <= code < 2**32:
@@ -184,7 +191,7 @@ class SafeTestResult(unittest.TestResult):
                 # Reconstruct known keys only; never preserve raw attributes.
                 value.update({key: command[key] for key in (
                     "stage", "process_stage", "returncode", "timed_out", "helper_error", "child_exception", "fixture_stage",
-                    "rpc_code", "failure_category",
+                    "rpc_code", "failure_category", *_support.LOADER_DIAGNOSTIC_FIELDS,
                 ) if key in command})
         safe = native_failure_diagnostic(value, self.allowed)
         if safe is not None and safe not in self.native_failures and len(self.native_failures) < len(self.allowed):

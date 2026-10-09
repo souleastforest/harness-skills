@@ -20,6 +20,7 @@ import ctypes
 import importlib.metadata
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -85,6 +86,187 @@ _INITIALIZE_FAILURE_CATEGORIES = {
     'adapter returned invalid exact model metadata for provider "deepseek-official" model "ci-mock-model"': "model-resolution",
     'adapter returned invalid context metadata for provider "deepseek-official" model "ci-mock-model"': "model-resolution",
 }
+# EntryTree.await() rethrows ONE Entry._await() failure verbatim; entry.ts
+# updateError() wraps it as "failed to <stage> loader entry <id> (<name>): <detail>".
+# These module names are literal rows in the pinned base/sdk-minimal bundles,
+# not module names or entry ids copied from a runtime error.
+LOADER_FAILURE_STAGES = frozenset(("import", "apply", "dispose", "rollback"))
+LOADER_FAILURE_MODULES = frozenset("""
+@deepseek-ai/cordis-plugin-timer
+@deepseek-ai/cordis-plugin-hmr
+@deepseek-ai/dsh-llm
+@deepseek-ai/dsh-deepseek-llm-api-extensions
+@deepseek-ai/dsh-session
+@deepseek-ai/dsh-session-log-deepseek
+@deepseek-ai/dsh-typert-registry
+@deepseek-ai/dsh-typert-loader
+@deepseek-ai/dsh-api-gateway
+@deepseek-ai/dsh-session-title
+@deepseek-ai/dsh-session-title-first-prompt-llm
+@deepseek-ai/dsh-user-questions
+@deepseek-ai/dsh-agent
+@deepseek-ai/dsh-plugin-package-inventory-deepseek
+@deepseek-ai/dsh-agent-default-model
+@deepseek-ai/dsh-jobs-local
+@deepseek-ai/dsh-llm-retry
+@deepseek-ai/dsh-settings-file
+@deepseek-ai/dsh-credentials-local
+@deepseek-ai/dsh-llm-pi-ai
+@deepseek-ai/dsh-session-persistence-jsonl
+@deepseek-ai/dsh-attachment-local
+@deepseek-ai/dsh-session-query-sqlite
+@deepseek-ai/dsh-session-projection
+@deepseek-ai/dsh-storage
+@deepseek-ai/dsh-storage-json
+@deepseek-ai/dsh-storage-domain
+@deepseek-ai/dsh-session-projection-cache
+@deepseek-ai/dsh-session-telemetry-otel
+@deepseek-ai/dsh-subprocess-local
+@deepseek-ai/dsh-sandbox-local
+@deepseek-ai/dsh-sandbox-policy
+@deepseek-ai/dsh-bash-sandbox
+@deepseek-ai/dsh-pwsh-sandbox
+@deepseek-ai/dsh-user-approval
+@deepseek-ai/dsh-permission-presets
+@deepseek-ai/dsh-shell-env
+@deepseek-ai/dsh-tool-bash
+@deepseek-ai/dsh-tool-pwsh
+@deepseek-ai/dsh-tool-jobs
+@deepseek-ai/dsh-fs-observation-policy
+@deepseek-ai/dsh-tool-fs
+@deepseek-ai/dsh-tool-fs-search
+@deepseek-ai/dsh-agent-instructions
+@deepseek-ai/dsh-skill
+@deepseek-ai/dsh-skill-filesystem
+@deepseek-ai/dsh-skill-badge
+@deepseek-ai/dsh-tool-skill
+@deepseek-ai/dsh-commands
+@deepseek-ai/dsh-command-feedback
+@deepseek-ai/dsh-goal
+@deepseek-ai/dsh-goal-round-driver
+@deepseek-ai/dsh-command-goal
+@deepseek-ai/dsh-plan-mode
+@deepseek-ai/dsh-token-meter
+@deepseek-ai/dsh-compaction-basic
+@deepseek-ai/dsh-command-compact
+@deepseek-ai/dsh-subagent
+@deepseek-ai/dsh-subagent-spawn-in-process
+@deepseek-ai/dsh-subagent-fork-in-process
+@deepseek-ai/dsh-tool-subagent-control
+@deepseek-ai/dsh-tool-subagent-control/list-agents
+@deepseek-ai/dsh-tool-subagent
+@deepseek-ai/dsh-workflow-worker-thread
+@deepseek-ai/dsh-tool-workflow
+@deepseek-ai/dsh-tool-call-timeout-policy
+@deepseek-ai/dsh-spill-local
+@deepseek-ai/dsh-spill-policy
+@deepseek-ai/dsh-session-checkpoint-policy
+@deepseek-ai/dsh-compaction-tool-result-pruner
+@deepseek-ai/dsh-tool-todo
+@deepseek-ai/dsh-tool-goal
+@deepseek-ai/dsh-tool-ralph
+@deepseek-ai/dsh-repeat-tool-reminder
+@deepseek-ai/dsh-web
+@deepseek-ai/dsh-web-search-deepseek
+@deepseek-ai/dsh-web-fetch-http
+@deepseek-ai/dsh-tool-web
+@deepseek-ai/dsh-tools
+@deepseek-ai/dsh-system-prompt
+@deepseek-ai/dsh-agent-loop
+@deepseek-ai/dsh-fs-sandbox
+@deepseek-ai/dsh-llm-deepseek
+@deepseek-ai/dsh-sdk-app
+@deepseek-ai/dsh-sdk-jsonrpc-server
+@deepseek-ai/dsh-terminal
+@deepseek-ai/dsh-terminal-bash
+@deepseek-ai/dsh-tool-bash-persistent
+@deepseek-ai/dsh-tool-pwsh-persistent
+""".split())
+LOADER_CAUSE_TOKENS = {
+    "native-addon": frozenset(("WIN32_MODULE_NOT_FOUND", "WIN32_PROCEDURE_NOT_FOUND", "WIN32_BAD_EXE_FORMAT",
+                               "WIN32_DLL_INIT_FAILED", "MODULE_DID_NOT_SELF_REGISTER")),
+    "os": frozenset(("ENOENT", "EACCES", "EPERM", "ENOTDIR", "EINVAL")),
+    "import": frozenset(("MODULE_NOT_FOUND", "ERR_MODULE_NOT_FOUND", "ERR_UNSUPPORTED_ESM_URL_SCHEME")),
+    "shell": frozenset(("PWSH_NOT_FOUND", "PWSH_INVALID_CONFIG")),
+    "unknown": frozenset(),
+}
+LOADER_DIAGNOSTIC_FIELDS = ("loader_stage", "loader_module", "loader_cause", "loader_token")
+_LOADER_WRAPPER = re.compile(
+    r"failed to (import|apply|dispose|rollback) loader entry [A-Za-z0-9_.:-]{1,128} "
+    r"\((@[A-Za-z0-9_./-]{1,128})\): (.+)"
+)
+_LOADER_NATIVE_SIGNATURES = {
+    "The specified module could not be found.": "WIN32_MODULE_NOT_FOUND",
+    "The specified procedure could not be found.": "WIN32_PROCEDURE_NOT_FOUND",
+    "%1 is not a valid Win32 application.": "WIN32_BAD_EXE_FORMAT",
+    "A dynamic link library (DLL) initialization routine failed.": "WIN32_DLL_INIT_FAILED",
+}
+_LOADER_OS_SIGNATURES = {
+    "ENOENT": "no such file or directory", "EACCES": "permission denied", "EPERM": "operation not permitted",
+    "ENOTDIR": "not a directory", "EINVAL": "invalid argument",
+}
+
+
+def loader_cause_signature(detail: str) -> tuple[str, str | None]:
+    """Match complete fixed error shapes; variable paths are inputs, never output."""
+    native = _LOADER_NATIVE_SIGNATURES.get(detail)
+    if native is not None:
+        return "native-addon", native
+    if re.fullmatch(r"Module did not self-register: '[^']{1,4096}'\.", detail):
+        return "native-addon", "MODULE_DID_NOT_SELF_REGISTER"
+    for code, signature in _LOADER_OS_SIGNATURES.items():
+        if re.fullmatch(re.escape(code + ": " + signature)
+                        + r", (?:open|read|write|stat|lstat|access|mkdir|rmdir|scandir|unlink|readlink|chmod) '[^']{1,4096}'", detail):
+            return "os", code
+    if detail == "spawn pwsh ENOENT":
+        return "shell", "PWSH_NOT_FOUND"
+    if re.fullmatch(r"pwsh-local: (?:timeoutMs|maxTimeoutMs|maxOutputBytes|maxSpillBytes|graceMs) must be a positive finite number", detail):
+        return "shell", "PWSH_INVALID_CONFIG"
+    if re.fullmatch(r"Cannot find module '[^']{1,4096}'", detail):
+        return "import", "MODULE_NOT_FOUND"
+    if re.fullmatch(r"Cannot find (?:module|package) '[^']{1,4096}' imported from [^\r\n]{1,4096}", detail):
+        return "import", "ERR_MODULE_NOT_FOUND"
+    if re.fullmatch(re.escape("Only URLs with a scheme in: file, data, and node are supported by the default ESM loader. "
+                              "On Windows, absolute paths must be valid file:// URLs. Received protocol ")
+                    + r"'[A-Za-z]:'", detail):
+        return "import", "ERR_UNSUPPORTED_ESM_URL_SCHEME"
+    return "unknown", None
+
+
+def loader_failure_fields(value: dict[str, Any]) -> dict[str, str]:
+    """Reconstruct a coherent allowlisted tuple at every diagnostic boundary."""
+    stage, module, cause, token = (value.get(field) for field in LOADER_DIAGNOSTIC_FIELDS)
+    if (type(stage) is not str or stage not in LOADER_FAILURE_STAGES
+            or type(module) is not str or module not in LOADER_FAILURE_MODULES
+            or type(cause) is not str or cause not in LOADER_CAUSE_TOKENS):
+        return {}
+    safe = {"loader_stage": stage, "loader_module": module, "loader_cause": cause}
+    if cause == "unknown":
+        return safe if "loader_token" not in value else {}
+    if type(token) is not str or token not in LOADER_CAUSE_TOKENS[cause]:
+        return {}
+    return {**safe, "loader_token": token}
+
+
+def loader_entry_failure_diagnostic(message: str) -> dict[str, str]:
+    """Parse just the pinned wrapper's first line, never SDK-appended stderr."""
+    if len(message) > 64 * 1024:
+        return {}
+    line, newline, _tail = message.partition("\n")
+    # Windows native loader errors may end their complete first line in CRLF.
+    # A CR anywhere else (or a header split over lines) remains malformed.
+    if newline and line.endswith("\r"):
+        line = line[:-1]
+    if any(ord(character) < 32 or ord(character) == 127 for character in line):
+        return {}
+    match = _LOADER_WRAPPER.fullmatch(line)
+    if match is None or match[2] not in LOADER_FAILURE_MODULES:
+        return {}
+    cause, token = loader_cause_signature(match[3])
+    safe = {"loader_stage": match[1], "loader_module": match[2], "loader_cause": cause}
+    if token is not None:
+        safe["loader_token"] = token
+    return loader_failure_fields(safe)
 
 
 def fixture_failure_diagnostic(error: Exception, diagnostic: dict[str, Any]) -> dict[str, Any]:
@@ -107,6 +289,9 @@ def fixture_failure_diagnostic(error: Exception, diagnostic: dict[str, Any]) -> 
             # initialize() may append stderr after the wire message. Do not scan
             # those later lines: a log mention is not evidence of the RPC cause.
             value["failure_category"] = _INITIALIZE_FAILURE_CATEGORIES.get(message.partition("\n")[0], "unknown")
+            loader = loader_entry_failure_diagnostic(message)
+            if loader:
+                value.update(failure_category="loader-settlement", **loader)
     return value
 
 
@@ -141,6 +326,9 @@ def command_diagnostic(returncode: Any, timed_out: bool, stdout: bytes | str = b
             category = envelope.get("failure_category")
             if type(category) is str and category in FIXTURE_FAILURE_CATEGORIES:
                 value["failure_category"] = category
+            if (value.get("failure_category") == "loader-settlement" and value.get("rpc_code") == -32603
+                    and value.get("fixture_stage") in ("initialize", "harness-enter")):
+                value.update(loader_failure_fields(envelope))
     return value
 
 

@@ -358,6 +358,143 @@ class CiSmokeTests(unittest.TestCase):
                 "returncode": 1, "timed_out": False,
             })
 
+    def test_loader_wrapper_fixed_families_and_variable_paths_are_safe(self):
+        error_type = type("JsonRpcError", (RuntimeError,), {})
+        module = "@deepseek-ai/dsh-subprocess-local"
+        signatures = [
+            (signature, "native-addon", token)
+            for signature, token in ci._support._LOADER_NATIVE_SIGNATURES.items()
+        ] + [
+            ("Module did not self-register: '" + SECRET + "'.", "native-addon", "MODULE_DID_NOT_SELF_REGISTER"),
+            ("spawn pwsh ENOENT", "shell", "PWSH_NOT_FOUND"),
+            ("pwsh-local: timeoutMs must be a positive finite number", "shell", "PWSH_INVALID_CONFIG"),
+            ("Cannot find module '" + SECRET + "'", "import", "MODULE_NOT_FOUND"),
+            ("Cannot find package '" + SECRET + "' imported from C:\\private\\runtime.js", "import", "ERR_MODULE_NOT_FOUND"),
+            ("Only URLs with a scheme in: file, data, and node are supported by the default ESM loader. "
+             "On Windows, absolute paths must be valid file:// URLs. Received protocol 'd:'", "import", "ERR_UNSUPPORTED_ESM_URL_SCHEME"),
+        ]
+        for path in ("C:\\private home 空格\\" + SECRET + ".node", "D:/different workspace/" + SECRET + ".node"):
+            for code, signature in ci._support._LOADER_OS_SIGNATURES.items():
+                signatures.append((code + ": " + signature + ", open '" + path + "'", "os", code))
+        for loader_stage in ci._support.LOADER_FAILURE_STAGES:
+            for cause, family, token in signatures:
+                with self.subTest(loader_stage=loader_stage, family=family, token=token):
+                    error = error_type(SECRET)
+                    error.code = -32603
+                    error.message = "failed to " + loader_stage + " loader entry arbitrary.secret-entry:17 (" + module + "): " + cause
+                    # SDK initialize() appends raw stderr after the wire message;
+                    # no later-line signature or data may change this classification.
+                    error.message += "\nstderr tail:\n" + SECRET + "\nloader fibers failed"
+                    if family == "native-addon" and token != "MODULE_DID_NOT_SELF_REGISTER":
+                        error.message = error.message.replace("\nstderr tail:", "\r\nstderr tail:", 1)
+                    error.data = {"private": SECRET}
+                    envelope = ci._support.fixture_failure_diagnostic(error, {"fixture_stage": "initialize"})
+                    self.assertEqual(envelope, {
+                        "fixture_failed": True, "error_type": "JsonRpcError", "fixture_stage": "initialize",
+                        "rpc_code": -32603, "failure_category": "loader-settlement",
+                        "loader_stage": loader_stage, "loader_module": module, "loader_cause": family, "loader_token": token,
+                    })
+                    self.assertNotIn(SECRET, json.dumps(envelope))
+                    self.assertNotIn("arbitrary.secret-entry", json.dumps(envelope))
+                    result = self.owned_result("", json.dumps({**envelope, "data": error.data, "message": SECRET}), returncode=1)
+                    def command_failure(case):
+                        case.assert_owned_success(result, stage="lifecycle")
+
+                    diagnostic = ci.run_suite(self.native_suite(command_failure), "native")
+                    detail = diagnostic["native_failures"][0]
+                    for field in ci._support.LOADER_DIAGNOSTIC_FIELDS:
+                        self.assertEqual(detail[field], envelope[field])
+                    public = self.command_failure(self.owned_result(json.dumps(diagnostic), SECRET), lane="native")
+                    self.assertIn('"loader_token": "' + token + '"', public)
+                    self.assertNotIn(SECRET, public)
+                    self.assertNotIn("arbitrary.secret-entry", public)
+
+    def test_loader_wrapper_rejects_malformed_modules_and_multiline_spoofs(self):
+        error_type = type("JsonRpcError", (RuntimeError,), {})
+        prefix = "failed to apply loader entry private-entry (@deepseek-ai/dsh-subprocess-local): "
+        for message in (
+            SECRET + "\n" + prefix + "spawn pwsh ENOENT",
+            "failed to apply loader entry private-entry\n(@deepseek-ai/dsh-subprocess-local): spawn pwsh ENOENT",
+            "failed to apply loader entry private-entry\r (@deepseek-ai/dsh-subprocess-local): spawn pwsh ENOENT",
+            "failed to apply loader entry private-entry\t (@deepseek-ai/dsh-subprocess-local): spawn pwsh ENOENT",
+            prefix.replace("apply", "start", 1) + "spawn pwsh ENOENT",
+            prefix.replace("private-entry", "entry id with spaces") + "spawn pwsh ENOENT",
+            prefix.replace("private-entry", "x" * 129) + "spawn pwsh ENOENT",
+            prefix.replace("@deepseek-ai/dsh-subprocess-local", "@private/" + SECRET) + "spawn pwsh ENOENT",
+            prefix.replace("@deepseek-ai/dsh-subprocess-local", "@deepseek-ai/dsh-subprocess-local-spoof") + "spawn pwsh ENOENT",
+            prefix.replace("): ", "):") + "spawn pwsh ENOENT",
+            prefix + "spawn pwsh ENOENT\r" + SECRET,
+            prefix + "x" * ci.MAX_DIAGNOSTIC,
+        ):
+            with self.subTest(kind=len(message)):
+                error = error_type(SECRET)
+                error.code, error.message, error.data = -32603, message, {"private": SECRET}
+                envelope = ci._support.fixture_failure_diagnostic(error, {"fixture_stage": "harness-enter"})
+                self.assertEqual(envelope, {
+                    "fixture_failed": True, "error_type": "JsonRpcError", "fixture_stage": "harness-enter",
+                    "rpc_code": -32603, "failure_category": "unknown",
+                })
+                self.assertNotIn(SECRET, json.dumps(envelope))
+        # Exact wrapper, but unrecognized cause: keep a fixed unknown, never
+        # scan stderr for a known token or infer a native cause from a mention.
+        for cause in (
+            SECRET, "unknown private error: ENOENT " + SECRET, "spawn pwsh ENOENT " + SECRET,
+            "Cannot find module '" + SECRET + "' " + SECRET,
+            "The specified module could not be found. " + SECRET,
+            "ENOENT: no such file or directory, open 'C:/" + SECRET + "' " + SECRET,
+        ):
+            error = error_type(SECRET)
+            error.code, error.message = -32603, prefix + cause + "\nThe specified module could not be found."
+            envelope = ci._support.fixture_failure_diagnostic(error, {"fixture_stage": "initialize"})
+            self.assertEqual(envelope["failure_category"], "loader-settlement")
+            self.assertEqual(envelope["loader_cause"], "unknown")
+            self.assertNotIn("loader_token", envelope)
+            self.assertNotIn(SECRET, json.dumps(envelope))
+        for stage, code in (("restore-request", -32603), ("initialize", -32601)):
+            error = error_type(SECRET)
+            error.code, error.message = code, prefix + "spawn pwsh ENOENT"
+            envelope = ci._support.fixture_failure_diagnostic(error, {"fixture_stage": stage})
+            self.assertEqual(envelope["failure_category"], "unknown")
+            self.assertFalse(set(ci._support.LOADER_DIAGNOSTIC_FIELDS) & envelope.keys())
+
+    def test_loader_wrapper_fields_are_validated_at_each_boundary(self):
+        baseline = {
+            "fixture_failed": True, "error_type": "JsonRpcError", "fixture_stage": "initialize", "rpc_code": -32603,
+            "failure_category": "loader-settlement", "loader_stage": "apply",
+            "loader_module": "@deepseek-ai/dsh-subprocess-local", "loader_cause": "os", "loader_token": "ENOENT",
+        }
+        result = self.owned_result("", json.dumps(baseline), returncode=1)
+        def command_failure(case):
+            case.assert_owned_success(result, stage="lifecycle")
+
+        diagnostic = ci.run_suite(self.native_suite(command_failure), "native")
+        detail = diagnostic["native_failures"][0]
+        allowed = ci.allowed_test_ids("native")
+        for field, invalid in (
+            ("loader_stage", SECRET), ("loader_stage", []), ("loader_module", SECRET), ("loader_module", {}),
+            ("loader_cause", SECRET), ("loader_cause", []), ("loader_token", SECRET), ("loader_token", {}),
+            ("loader_cause", "unknown"), ("loader_cause", "import"), ("rpc_code", -32601),
+            ("fixture_stage", "first-turn"), ("failure_category", "unknown"),
+        ):
+            with self.subTest(field=field, kind=type(invalid).__name__):
+                envelope = {**baseline, field: invalid}
+                command = ci._support.command_diagnostic(1, False, "", json.dumps(envelope))
+                self.assertFalse(set(ci._support.LOADER_DIAGNOSTIC_FIELDS) & command.keys())
+                self.assertIsNone(ci.native_failure_diagnostic({**detail, field: invalid}, allowed))
+        for field in ci._support.LOADER_DIAGNOSTIC_FIELDS:
+            envelope, incomplete_detail = dict(baseline), dict(detail)
+            del envelope[field], incomplete_detail[field]
+            self.assertFalse(set(ci._support.LOADER_DIAGNOSTIC_FIELDS) & ci._support.command_diagnostic(1, False, "", json.dumps(envelope)).keys())
+            self.assertIsNone(ci.native_failure_diagnostic(incomplete_detail, allowed))
+        unknown = {**baseline, "loader_cause": "unknown"}
+        del unknown["loader_token"]
+        command = ci._support.command_diagnostic(1, False, "", json.dumps(unknown))
+        self.assertEqual(command["loader_cause"], "unknown")
+        self.assertNotIn("loader_token", command)
+        unknown_detail = {key: value for key, value in detail.items() if key != "loader_token"}
+        unknown_detail["loader_cause"] = "unknown"
+        self.assertIsNotNone(ci.native_failure_diagnostic(unknown_detail, allowed))
+
     def test_native_assertion_sites_and_cleanup_errors_preserve_outcomes(self):
         # Use real checked-in methods as traceback sites; never publish the
         # exception string (which intentionally contains private data here).

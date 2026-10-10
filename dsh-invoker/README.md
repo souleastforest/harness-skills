@@ -13,7 +13,7 @@ SDK 自带匹配的原生 runtime。默认使用保守的 `sdk`，不会为了�
 - **还没装过 DSH**：从[第一次初始化](#第一次初始化先检查再决定)开始。
 - **`dsh` 命令有了，但委派失败**：看[已有安装的诊断](#有-dsh-命令却调用失败)。
 - **已经能用，想换项目或委派新任务**：看[复用绑定与独立任务](#以后怎样复用)。
-- **在 Windows 上使用**：看 [PowerShell 入口](#windows-与含空格路径)。
+- **在 Windows 上使用**：看 [PowerShell 入口](#windows-与含空格路径)；原生 SDK 验证交接见[Windows runbook](references/windows-handoff.md)。
 - **想知道保存或发送了什么**：看[数据与权限边界](#哪些数据会保存或发送)。
 
 ## 第一次初始化：先检查，再决定
@@ -138,9 +138,12 @@ $ProjectRoot = 'C:\Work\Demo Project'
 若脚本被执行策略阻止，请遵循组织的脚本信任流程或在自己的终端处理；不要使用
 `ExecutionPolicy Bypass`。完整 PowerShell 示例见[安装与调用](references/install-and-run.md)。
 
-支持范围由固定版本的官方 runtime wheel 决定：macOS 14+ x64/arm64、Linux glibc 2.28+
-x64/arm64、Windows x64。不承诺 Alpine/musl 或原生 Windows ARM；出现不兼容时停止，
-不要自动降级到另一种未经确认的入口。
+固定版本的官方 runtime wheel 发布范围为 macOS 14+ x64/arm64、Linux glibc 2.28+ x64/arm64
+和 Windows x64；这不是本项目的平台验证结论。当前验证范围仅为 Linux x64 与 macOS 14 ARM64。
+Windows PowerShell 实现和示例保留，但 SDK 启动原生验证未通过，Windows CI 按用户要求暂缓；
+不将 Windows 宣称为已验证的生产支持。不承诺 Alpine/musl 或原生 Windows ARM；出现不兼容时停止，
+不要自动降级到另一种未经确认的入口。准备在 Windows 环境继续验证时，按
+[Windows 开发交接](references/windows-handoff.md) 使用合成项目和 loopback 测试；不要使用真实 home/key。
 
 ## 哪些数据会保存或发送
 

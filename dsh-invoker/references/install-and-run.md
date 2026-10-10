@@ -89,17 +89,18 @@ wheel。不要把这些约束替换成系统 `pip install`、自动升级或临�
 决定修复现有 uv 后再试。`exec` 不会替你修复缺失依赖，安装必须回到明确许可的
 `setup`。不要删除其他项目或已有用户环境来“清理”。
 
-支持边界由 runtime wheel 决定：
+固定 runtime wheel 的原生发布范围与本项目验证范围不同：
 
-| 系统 | 可承诺的目标 |
+| 系统 | 状态 |
 | --- | --- |
-| macOS | 14+，x64 / arm64 |
-| Linux | glibc 2.28+，x64 / arm64 |
-| Windows | x64，PowerShell 7.2+（`pwsh`，不是 Windows PowerShell 5.1） |
+| macOS | 当前已验证：macOS 14 ARM64；官方 wheel 发布范围还包括 x64 |
+| Linux | 当前已验证：x64；官方 wheel 发布范围还包括 glibc 2.28+ ARM64 |
+| Windows | Windows x64 / PowerShell 7.2+（`pwsh`）实现与命令示例保留，但 SDK 启动原生验证未通过，后续验证按用户要求暂缓；未验证，不是生产支持承诺 |
 
 不承诺 Alpine/musl 或原生 Windows ARM。SDK 正常调用不需要系统 Node CLI；管理
 外部插件是另一类任务，不属于这里的自动安装流程。Windows 若受脚本执行策略阻止，
-交给用户/组织的信任流程处理，不加 `ExecutionPolicy Bypass`。
+交给用户/组织的信任流程处理，不加 `ExecutionPolicy Bypass`。Windows 命令目前仅供后续验证时参考；
+需要复现 SDK 启动或恢复 Windows CI 前，先读 [Windows 开发交接](windows-handoff.md)。
 
 ## 3. 保存此前已确认的 home/profile
 

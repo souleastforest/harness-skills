@@ -167,9 +167,10 @@ Windows 在释放 worker 输入门之前绑定 kill-on-close Job；POSIX 在输�
 
 ### 平台或安装被阻塞
 
-固定 runtime wheel 的原生范围：macOS 14+ x64/arm64、Linux glibc 2.28+ x64/arm64、
-Windows x64。Windows 使用 `pwsh`（入口要求 PowerShell 7.2+ / .NET 6）；uv 本身能在其他平台
-安装不代表 DSH wheel 可用。不承诺 Alpine/musl 或 Windows ARM 原生支持。
+固定 runtime wheel 的原生发布范围包括 macOS 14+ x64/arm64、Linux glibc 2.28+ x64/arm64
+和 Windows x64；这不等于项目验证通过。当前验证范围仅为 Linux x64 与 macOS 14 ARM64。
+Windows 的 PowerShell 实现和示例保留，但 SDK 启动原生验证未通过，后续验证按用户要求暂缓；
+Windows 未验证，不是生产支持承诺。恢复 Windows 测试前先读 [Windows 开发交接](windows-handoff.md)。不承诺 Alpine/musl 或原生 Windows ARM。
 
 受执行策略/组织策略阻止时，由用户按其信任流程处理，不使用执行策略绕过。不自动
 安装 PowerShell、启用 WSL、源码构建、替换全局 uv 或换 CLI 来规避当前阻塞。

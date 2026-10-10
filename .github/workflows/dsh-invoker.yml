@@ -28,13 +28,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Windows validation deferred at user request; PowerShell implementation remains unverified.
           - runner: ubuntu-24.04
             label: Linux x64
             os: Linux
-            arch: x64
-          - runner: windows-2022
-            label: Windows x64 (pwsh)
-            os: Windows
             arch: x64
           # macos-14 is currently ARM64 for standard public/private runners.
           # The driver also checks platform.machine(); never mislabel Intel.

@@ -19,6 +19,7 @@ Python SDK 使用 `sdk`，不自动换成 CLI 或权限更宽的 `sdk-minimal`�
 - 要执行命令或处理 PowerShell 路径：读 [安装与调用](references/install-and-run.md)。
 - 要判断权限、日志、会话或超时边界：读 [SDK 与安全边界](references/sdk-and-safety.md)。
 - 要核对技术依据或方法来源：读 [来源](references/sources.md)。
+- 要继续 Windows x64 / PowerShell 原生 SDK 验证：读 [Windows 开发交接](references/windows-handoff.md)；该路径目前未验证且默认 CI 暂缓。
 
 这些页面按需读取。不要用接口清单或整张安装问卷代替引导。
 
@@ -105,8 +106,10 @@ $ProjectRoot = 'C:\Work\Demo Project'
 - 受管 Python 为 3.12，SDK 与 runtime 固定 `0.1.5rc1`。新 uv/Python/venv/cache/tmp
   都在任务项目的 `.dsh-invoker-profile/`；不改全局 PATH、shell 配置、注册表或已有环境，
   不运行全局 pip/self-update。现有 uv 能力不足就报告，不偷偷替换。
-- 官方 wheel 边界：macOS 14+ x64/arm64、Linux glibc 2.28+ x64/arm64、Windows x64。
-  Windows 使用 PowerShell 7.2+（`pwsh`）；不承诺 Alpine/musl 或原生 Windows ARM。不要绕过执行策略。
+- 官方 wheel 发布范围：macOS 14+ x64/arm64、Linux glibc 2.28+ x64/arm64、Windows x64；
+  Windows 入口使用 PowerShell 7.2+（`pwsh`）。这不等于本项目的平台验证结论：当前验证范围仅
+  Linux x64 与 macOS 14 ARM64。Windows PowerShell 实现和示例保留，但 SDK 启动原生验证未通过，
+  Windows CI 按用户要求暂缓；不将 Windows 宣称为已验证的生产支持。不要绕过执行策略；不承诺 Alpine/musl 或原生 Windows ARM。
 
 绑定由 helper 保存，不手写配置。以下命令仅在用户确认 home/profile 和保存之后执行：
 

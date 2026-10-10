@@ -18,13 +18,19 @@
 
 仅在 disposable checkout/临时目录执行 setup 和测试。切勿将真实用户 home、已有 DSH profile、API key、代理凭据或生产配置指向这些检查。示例路径均为占位符；把含空格/Unicode 的测试目录完整引用。bootstrap `exec` 使用受管 venv 的绝对 Python 并加 `-I -B`，不要以系统 Python、全局 CLI 或 `sdk-minimal` 绕过失败。没有任何 SDK 排障步骤需要真实模型请求或真实 key；安装阶段若需网络下载固定工具/wheels，应单独确认。
 
-以下测试与 CI-driver 命令块只在新开的专用 PowerShell 子进程中执行（在新终端输入 `pwsh -NoProfile`）；不要粘贴到日常 PowerShell 会话。它们会临时覆盖进程级环境变量（包括 `HOME`、`USERPROFILE`、`TMP` 等），退出该子进程即可恢复父进程环境，不会改用户/机器级设置。先清理子进程继承的密钥与 DSH 覆盖变量：
+以下测试与 CI-driver 命令块只在新开的专用 PowerShell 子进程中执行（在新终端输入 `pwsh -NoProfile`）；不要粘贴到日常 PowerShell 会话。它们会临时覆盖进程级环境变量（包括 `HOME`、`USERPROFILE`、`TMP` 等），退出该子进程即可恢复父进程环境，不会改用户/机器级设置。先按变量名称筛除子进程继承的密钥、代理凭据和 DSH 覆盖项；不会输出这些变量的值：
 
 ```powershell
-foreach ($Name in @('DEEPSEEK_API_KEY','DEEPSEEK_BASE_URL','DSH_HOME','DSH_RUNTIME_MODE','DSH_PERMISSION_MODE','DSH_BIN','DSH_INVOKER_REQUIRE_RUNTIME','DSH_INVOKER_TEST_ROOT','DSH_INVOKER_TEST_TMP')) {
-  Remove-Item "Env:$Name" -ErrorAction SilentlyContinue
+$SensitivePattern = '(?i)(api.?key|token|secret|password|credential|access.?key)'
+Get-ChildItem Env: | Where-Object { $_.Name -match $SensitivePattern } | ForEach-Object {
+  Remove-Item -LiteralPath "Env:$($_.Name)" -ErrorAction SilentlyContinue
+}
+foreach ($Name in @('HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','NO_PROXY','DEEPSEEK_API_KEY','DEEPSEEK_BASE_URL','DSH_HOME','DSH_RUNTIME_MODE','DSH_PERMISSION_MODE','DSH_BIN','DSH_INVOKER_REQUIRE_RUNTIME','DSH_INVOKER_TEST_ROOT','DSH_INVOKER_TEST_TMP')) {
+  Remove-Item -LiteralPath "Env:$Name" -ErrorAction SilentlyContinue
 }
 ```
+
+后续命令不依赖用户/机器级 PATH 改动。若安装所需下载必须经过企业代理，请在受控 disposable 环境中遵循组织策略；不要为测试改变安全策略或把代理凭据写进输出。
 
 ## 逐步复现
 
@@ -84,6 +90,7 @@ if ($UnitExit -ne 0) { throw 'offline unit tests failed' }
 $env:DSH_INVOKER_REQUIRE_RUNTIME = '1'
 $env:DSH_INVOKER_TEST_ROOT = Join-Path $Project '.dsh-invoker-profile\tmp\windows-native-tests'
 New-Item -ItemType Directory -Path $env:DSH_INVOKER_TEST_ROOT -Force | Out-Null
+$TestExit = 1
 try {
   & $Bootstrap -Action exec -ProjectRoot $Project -PythonArgs @(
     $CiSmoke, '--lane', 'native', '--project-root', $Project
@@ -106,7 +113,7 @@ if ($TestExit -ne 0) { throw 'REQUIRED native SDK tests failed' }
 
 先复现上面的零 provider 流量生命周期测试，确认失败 stage 是 `initialize`，以及外层 watchdog 与 owned process cleanup 的结果。不要把一次 initialize 异常和进程泄漏混为一谈；测试 harness 在 Windows 会先将 gated Python worker 放入 kill-on-close Job 再放行子进程，并在结束时检查 Job 进程计数/清理。若报告 Job assignment、watchdog 或 cleanup 阶段错误，应优先独立处理该测试基础设施问题。
 
-如生命周期仍在 initialize 失败，下一步由接手者在完全合成的临时 fixture 中做一次 Windows 本机观察，不使用真实 API key、不发送真实 provider/外网请求。现有 pinned SDK 的公开入口名称已在 `tests/test_runtime_integration.py` 验证：`from deepseek_harness.client import HarnessClient, HarnessConfig`；该测试的 `lifecycle` 分支用 `HarnessClient(HarnessConfig(**common))`、`client.initialize(cwd=..., provider="deepseek-official", model="ci-mock-model")` 和上下文管理退出完成 initialize/shutdown。先沿用该测试的 `RuntimeFixture` 与 `child_config` 构造方式（synthetic `sdk` profile、synthetic `dsh_home`、本机拒绝请求的 listener），并在 fixture stage 记录点观察类型、`code`、`message` 及 `data` 中受限字符串；不得序列化整个 `data`，也不得公开原始异常/路径。该 `lifecycle` 场景要求 listener 收到零模型 HTTP 请求；其它 integration 用例按设计会向 loopback mock 发送 HTTP 请求，不能把它们描述成零 HTTP。对照 SDK/runtime `0.1.5rc1` 行为，区分 import/runtime-resolve/client-enter/initialize/shutdown 阶段。若仍需要新增 probe，先作为小型、本地、隔离且可清理的实验审查使用，不要未经审查加入正常 CI 或源码。
+如生命周期仍在 initialize 失败，下一步由接手者在完全合成的临时 fixture 中做一次 Windows 本机观察，不使用真实 API key、不发送真实 provider/外网请求。现有 pinned SDK 的公开入口名称已在 `tests/test_runtime_integration.py` 验证：`from deepseek_harness.client import HarnessClient, HarnessConfig`；该测试的 `lifecycle` 分支用 `HarnessClient(HarnessConfig(**common))`、`client.initialize(cwd=..., provider="deepseek-official", model="ci-mock-model")` 和上下文管理退出完成 initialize/shutdown。该 lifecycle 分支不配置模型 HTTP listener，且不会发出 provider/model HTTP 请求；不要混淆它与另外会向 loopback mock 发送 HTTP 的集成用例。先沿用测试的 `RuntimeFixture` 构造 synthetic `sdk` profile、synthetic `dsh_home` 和隔离工作区，并在 fixture stage 记录点观察异常类型、`code`、`message` 及 `data` 中受限字符串；不得序列化整个 `data`，也不得公开原始异常/路径。对照 SDK/runtime `0.1.5rc1` 行为，区分 import/runtime-resolve/client-enter/initialize/shutdown 阶段。若仍需要新增 probe，先作为小型、本地、隔离且可清理的实验审查使用，不要未经审查加入正常 CI 或源码。
 
 目标是取得一条能安全复现且证据足够的原因，不是扩大分类器。若原因未知，报告 unknown 和准确阶段，保留秘密，不根据通用 `-32603` 添加盲目 error map。不要将根因标为 SDK bug、Windows unsupported、provider 问题或 native addon 问题，除非新的原生证据能支持该结论。
 

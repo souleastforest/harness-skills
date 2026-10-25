@@ -1,0 +1,4 @@
+interface:
+  display_name: "人类友好协作"
+  short_description: "介绍协作用法，用子命令选择设计讨论、软件开发、寓言学习和团队编排"
+  default_prompt: "请用 $collaborative-work 介绍你的用途、可选子命令和调用示例。"

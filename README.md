@@ -8,6 +8,7 @@
 - [reader-first-technical-docs](reader-first-technical-docs/SKILL.md)：把技术文档整理成读者能理解和实践的教程、概念说明与查询参考。行文方法参考 DSH Cordis 教程。
 - [dsh-invoker](dsh-invoker/README.md)：通过 DeepSeek Harness Python SDK 委派任务，逐步引导初始化与调用诊断。当前验证范围为 Linux x64 与 macOS 14 ARM64；Windows PowerShell 实现保留但原生 SDK 启动未验证，详见技能说明。
 - [two-way-steelman](two-way-steelman/SKILL.md)：双向钢人化分析。
+- [collaborative-work](collaborative-work/SKILL.md)：通用人机协作，按任务复杂度选择设计讨论、软件开发、寓言学习和显式团队编排。当前版本为 0.3.0。
 - [sleep-screenshot-log](sleep-screenshot-log/SKILL.md)：引导首用设置，手动读取睡眠长截图，保留原图并幂等写入个人中枢的睡眠月档。
 
 ## DSH 插件
@@ -27,6 +28,12 @@
 若使用 Codex 的 skill-installer，也可提供
 [该技能的仓库地址](https://github.com/souleastforest/harness-skills/tree/main/reader-first-technical-docs)
 进行安装。阅读与下载都不依赖原作者的本地工作目录。
+
+## 下载 collaborative-work 0.3.0
+
+[ZIP 压缩包](dist/collaborative-work-v0.3.0.zip)、[.skill 技能包](dist/collaborative-work-v0.3.0.skill)与 [SHA256 校验文件](dist/collaborative-work-v0.3.0.sha256)。解压后得到 `collaborative-work/`，包含入口、专项参考和随附许可证。
+
+0.3.0 是单技能包。`collaborative-work:story` 等写法是加载技能后的对话约定，尚未注册成 Codex 桌面版可选择的独立子技能，也不提供冒号补全。主入口可介绍功能，用户也可用自然语言选择；独立入口修复另行发布。
 
 ## 在 Hermes 使用睡眠入档技能
 

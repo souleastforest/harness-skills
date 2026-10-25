@@ -1,7 +1,7 @@
 # Harness Skills
 
 这里保存可以跨项目使用的智能体技能。每项技能独立放在一个顶层目录，入口是其中的
-`SKILL.md`，需要时再读取它链接的参考文件。
+`SKILL.md`，需要时再读取它链接的参考文件。除技能外，本仓库也存放随附的 DSH 插件，见下方「DSH 插件」。
 
 ## 选择技能
 
@@ -9,6 +9,12 @@
 - [dsh-invoker](dsh-invoker/README.md)：通过 DeepSeek Harness Python SDK 委派任务，逐步引导初始化与调用诊断。当前验证范围为 Linux x64 与 macOS 14 ARM64；Windows PowerShell 实现保留但原生 SDK 启动未验证，详见技能说明。
 - [two-way-steelman](two-way-steelman/SKILL.md)：双向钢人化分析。
 - [sleep-screenshot-log](sleep-screenshot-log/SKILL.md)：引导首用设置，手动读取睡眠长截图，保留原图并幂等写入个人中枢的睡眠月档。
+
+## DSH 插件
+
+这些不是技能形态（没有 `SKILL.md`），而是可直接安装的 DSH bundle（插件）：
+
+- [maid-atelier-desktop-bridge](maid-atelier-desktop-bridge/README.md)：把 maid-atelier 皮肤的美术层重新挂载到 DSH Desktop 自有窗口布局的对话列，修复窗口模式为 `advanced`/`extended` 时对话区纯黑、宫殿背景与女仆立绘不显示的问题。README 含完整排障记录与复用教训，其中两条对任何 DSH 插件作者都适用：bundle 的 `exports` 必须导出 `./package.json`，以及新装 bundle 需要重启一次 DSH 才会进入 client 模块图。
 
 ## 下载写作技能
 

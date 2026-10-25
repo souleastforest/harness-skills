@@ -1,0 +1,6 @@
+# maid-atelier-desktop-bridge bundle patch: one Client-only row beside the
+# maid-atelier skin row. The skin keeps its own Host half (the
+# /skin-assets/maid-atelier route), so this row serves no Host behaviour.
+- insert:
+    - id: maid-atelier-desktop-bridge
+      name: '@local/maid-atelier-desktop-bridge'

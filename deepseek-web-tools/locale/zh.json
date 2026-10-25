@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "DeepSeek 网页搜索与抓取 (dsh-deepseek-web-tools)",
+    "description": "把 DeepSeek 官方 Search/Fetch 专用接口接入 web 工具，带两级自动回退（搜索回退旧对话式搜索、抓取回退本地 HTTP）。"
+  }
+}

@@ -15,6 +15,7 @@
 这些不是技能形态（没有 `SKILL.md`），而是可直接安装的 DSH bundle（插件）：
 
 - [maid-atelier-desktop-bridge](maid-atelier-desktop-bridge/README.md)：把 maid-atelier 皮肤的美术层重新挂载到 DSH Desktop 自有窗口布局的对话列，修复窗口模式为 `advanced`/`extended` 时对话区纯黑、宫殿背景与女仆立绘不显示的问题。README 含完整排障记录与复用教训，其中两条对任何 DSH 插件作者都适用：bundle 的 `exports` 必须导出 `./package.json`，以及新装 bundle 需要重启一次 DSH 才会进入 client 模块图。
+- [deepseek-web-tools](deepseek-web-tools/README.md)：把 DeepSeek 官方 Search / Fetch 接口接到 DSH 的 `ctx.web`，搜索与抓取走专用端点，失败时回退到原有后端，并可用停用 bundle 一键回滚。
 
 ## 下载写作技能
 

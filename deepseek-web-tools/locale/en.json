@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "DeepSeek Web Search & Fetch (dsh-deepseek-web-tools)",
+    "description": "Wires the official DeepSeek Search/Fetch endpoints into the web tools, with automatic fallback to the previous backends."
+  }
+}

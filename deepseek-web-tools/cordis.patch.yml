@@ -1,0 +1,28 @@
+# dsh-deepseek-web-tools bundle patch.
+#
+# Layer 1 — pin the web seam at the dedicated DeepSeek retrieval endpoints:
+#   * search: `deepseek-tools` (POST /v1/tools/search, plain JSON, no model turn)
+#   * fetch:  `deepseek-tools` (POST /v1/tools/fetch, Markdown)
+# A patch entry replaces the targeted row's whole config, so both keys are
+# restated. This override is the ONLY thing tying the seam to this bundle: when
+# the bundle is disabled or removed, the override disappears with the layer and
+# the base composition (`deepseek-official` + `http`) is restored unchanged.
+- id: web
+  config:
+    searchProvider: deepseek-tools
+    fetchProvider: deepseek-tools
+
+# Layer 2 — the Host row registering both providers. The shipped backends that
+# this bundle falls back to stay mounted by the base layer and are looked up in
+# the live registries, so they must NOT be disabled here.
+- insert:
+    - id: web-deepseek-tools
+      name: '@local/dsh-deepseek-web-tools'
+      config:
+        # Both fallbacks are on by default (search → deepseek-official,
+        # fetch → http). The keys are restated so the downgrade path is visible
+        # and editable in one place.
+        searchFallback: true
+        searchFallbackProvider: deepseek-official
+        fetchFallback: true
+        fetchFallbackProvider: http

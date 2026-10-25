@@ -1,0 +1,3 @@
+interface:
+  display_name: "AI-native 软件开发"
+  short_description: "把软件需求推进为可验收的小切片，并按风险选择验证和交付证据"

@@ -1,0 +1,4 @@
+interface:
+  display_name: "collaborative-work:matt · Matt 接入"
+  short_description: "核对 Matt 规格驱动执行链的原版入口、依赖和授权，准备交接；适用于明确选择该接入的请求。"
+  default_prompt: "请用 $collaborative-work:matt 处理我提供的任务，沿用已有目标、约束和授权。"

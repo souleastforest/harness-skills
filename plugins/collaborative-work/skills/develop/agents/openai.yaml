@@ -1,0 +1,4 @@
+interface:
+  display_name: "collaborative-work:develop · 软件开发"
+  short_description: "按规模处理软件开发任务，包括研究、方案、计划、实现和验证；用户只要方案时交付方案。"
+  default_prompt: "请用 $collaborative-work:develop 处理我提供的任务，沿用已有目标、约束和授权。"

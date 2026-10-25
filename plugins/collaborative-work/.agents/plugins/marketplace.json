@@ -1,0 +1,20 @@
+{
+  "name": "collaborative-work-local",
+  "interface": {
+    "displayName": "Collaborative Work Local"
+  },
+  "plugins": [
+    {
+      "name": "collaborative-work",
+      "source": {
+        "source": "local",
+        "path": "./"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "name": "collaborative-work",
+  "version": "0.5.0",
+  "description": "通用人机协作与可选择的设计讨论、软件开发、寓言学习和团队编排入口。",
+  "author": {
+    "name": "souleastforest"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "人类友好协作",
+    "shortDescription": "选择协作、开发、寓言学习等独立技能入口",
+    "longDescription": "提供主协作技能及八个独立功能入口，按未知程度和影响范围推进任务，团队编排由用户显式启用。",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "介绍 collaborative-work 的功能和独立入口。"
+    ]
+  },
+  "license": "MIT"
+}

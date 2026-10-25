@@ -1,0 +1,4 @@
+interface:
+  display_name: "collaborative-work:maintain · 技能维护"
+  short_description: "创建、改进、验证或发布技能时使用，按本次改动保存基线、选择验收和更新安装。"
+  default_prompt: "请用 $collaborative-work:maintain 处理我提供的任务，沿用已有目标、约束和授权。"

@@ -1,0 +1,6 @@
+interface:
+  display_name: "collaborative-work:team · 团队编排"
+  short_description: "用户明确选择团队编排时使用，按可用代理和用户指定模型确定职责，再按任务分工。"
+  default_prompt: "请用 $collaborative-work:team 处理我提供的任务，沿用已有目标、约束和授权。"
+policy:
+  allow_implicit_invocation: false

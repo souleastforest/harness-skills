@@ -1,0 +1,42 @@
+name: Collaborative Work checks
+
+on:
+  push:
+    paths:
+      - 'plugins/collaborative-work/**'
+      - 'tools/collaborative_work/**'
+      - 'evals/collaborative-work/**'
+      - '.github/workflows/collaborative-work.yml'
+  pull_request:
+    paths:
+      - 'plugins/collaborative-work/**'
+      - 'tools/collaborative_work/**'
+      - 'evals/collaborative-work/**'
+      - '.github/workflows/collaborative-work.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  portable-checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          version: '0.9.20'
+          python-version: '3.13'
+      - name: Prepare declared environment
+        run: uv sync --project tools/collaborative_work --locked
+      - name: Unit and boundary checks
+        run: tools/collaborative_work/.venv/bin/python -B -m unittest discover -s tools/collaborative_work/tests -v
+      - name: Validate runtime bundle
+        run: tools/collaborative_work/.venv/bin/python -B -m cwrelease validate plugins/collaborative-work
+      - name: Build and verify deterministic artifacts
+        run: |
+          tools/collaborative_work/.venv/bin/python -B -m cwrelease build plugins/collaborative-work --output .build/cw-one
+          tools/collaborative_work/.venv/bin/python -B -m cwrelease build plugins/collaborative-work --output .build/cw-two
+          diff -r .build/cw-one .build/cw-two
+          tools/collaborative_work/.venv/bin/python -B -c 'from pathlib import Path; from cwrelease.package import verify; p=next(Path(".build/cw-one").glob("*.zip")); s=p.with_suffix(""); verify(p, str(s)+".manifest.json", str(s)+".sha256")'

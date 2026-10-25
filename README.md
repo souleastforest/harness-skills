@@ -8,7 +8,7 @@
 - [reader-first-technical-docs](reader-first-technical-docs/SKILL.md)：把技术文档整理成读者能理解和实践的教程、概念说明与查询参考。行文方法参考 DSH Cordis 教程。
 - [dsh-invoker](dsh-invoker/README.md)：通过 DeepSeek Harness Python SDK 委派任务，逐步引导初始化与调用诊断。当前验证范围为 Linux x64 与 macOS 14 ARM64；Windows PowerShell 实现保留但原生 SDK 启动未验证，详见技能说明。
 - [two-way-steelman](two-way-steelman/SKILL.md)：双向钢人化分析。
-- [collaborative-work](collaborative-work/SKILL.md)：通用人机协作，按任务复杂度选择设计讨论、软件开发、寓言学习和显式团队编排。当前版本为 0.3.0。
+- [collaborative-work 插件](plugins/collaborative-work/README.md)：Codex 的九项独立入口，支持通用协作、软件开发、寓言学习和显式团队编排。当前插件为 0.5.0；旧单技能 0.3.0 作为历史版本保留。
 - [sleep-screenshot-log](sleep-screenshot-log/SKILL.md)：引导首用设置，手动读取睡眠长截图，保留原图并幂等写入个人中枢的睡眠月档。
 
 ## DSH 插件
@@ -28,6 +28,12 @@
 若使用 Codex 的 skill-installer，也可提供
 [该技能的仓库地址](https://github.com/souleastforest/harness-skills/tree/main/reader-first-technical-docs)
 进行安装。阅读与下载都不依赖原作者的本地工作目录。
+
+## Codex collaborative-work 插件 0.5.0
+
+[ZIP 插件包](dist/collaborative-work-plugin-v0.5.0.zip)、[完整清单](dist/collaborative-work-plugin-v0.5.0.manifest.json)与[校验文件](dist/collaborative-work-plugin-v0.5.0.sha256)。插件注册 `collaborative-work:start` 及八项独立功能；安装方法见[插件说明](plugins/collaborative-work/README.md)。
+
+本轮增加可复现构建、严格发现检查、评估用例与 MIT 许可，并完成本机升级/回退演练。[验证记录](docs/collaborative-work/0.5.0-validation.md)分别说明已检查内容和证据限制；尚未验证桌面补全交互、其他宿主或远端 CI。发布工具和评估材料保存在源码中，不随运行插件分发。
 
 ## 下载 collaborative-work 0.3.0
 

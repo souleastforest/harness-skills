@@ -1,0 +1,4 @@
+interface:
+  display_name: "collaborative-work:start · 协作主入口"
+  short_description: "介绍协作用法，按目标与复杂度推进任务，按需进入开发或寓言学习流程"
+  default_prompt: "请用 $collaborative-work:start 推进我提供的任务；若暂无具体任务，先介绍用途和可选入口。"

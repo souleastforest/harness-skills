@@ -1,0 +1,4 @@
+interface:
+  display_name: "collaborative-work:help · 介绍用法"
+  short_description: "介绍 collaborative-work 的用途、独立功能入口和调用例子。用户只问某项功能时，只介绍该项。"
+  default_prompt: "请用 $collaborative-work:help 介绍 collaborative-work 的用途和功能入口。"

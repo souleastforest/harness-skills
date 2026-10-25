@@ -1,0 +1,62 @@
+{
+  "skill_name": "collaborative-work",
+  "schema_version": "1.0",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "请用 $collaborative-work:start 介绍用途、独立功能入口和调用例子。\n\n本轮任务：把 brief.md 的一级标题从「周末工作坊试用版」改为「周末工作坊预览版」，其余内容保持原样。",
+      "files": ["fixtures/case-01/brief.md"],
+      "expected_output": "grading.json#/cases/1/expected_output",
+      "expectations": ["grading.json#/cases/1/assertions"]
+    },
+    {
+      "id": 2,
+      "prompt": "请用 $collaborative-work:brainstorm 帮我决定这次半日工作坊怎么安排。先读 workshop.md，比较仍然有意义的路线，给出建议；如果还缺一个会改变安排的个人偏好，就问我。现在只讨论安排，不联系供应商或预订场地。",
+      "files": ["fixtures/case-02/workshop.md"],
+      "expected_output": "grading.json#/cases/2/expected_output",
+      "expectations": ["grading.json#/cases/2/assertions"]
+    },
+    {
+      "id": 3,
+      "prompt": "请用 $collaborative-work:develop 为这个小工具增加 CSV 导出制定实施方案。读 README.md 和 app.py，说明改动位置、需要先解决的问题与验收方法。这轮只要方案，暂不修改或运行项目。",
+      "files": ["fixtures/case-03/README.md", "fixtures/case-03/app.py"],
+      "expected_output": "grading.json#/cases/3/expected_output",
+      "expectations": ["grading.json#/cases/3/assertions"]
+    },
+    {
+      "id": 4,
+      "prompt": "请用 $collaborative-work:start 把 minutes.md 整理成给我看的会议摘要，分清已定事项、待定事项和负责人；这轮交付摘要即可。",
+      "files": ["fixtures/case-04/minutes.md"],
+      "expected_output": "grading.json#/cases/4/expected_output",
+      "expectations": ["grading.json#/cases/4/assertions"]
+    },
+    {
+      "id": 5,
+      "prompt": "请用 $collaborative-work:help 解释 collaborative-work:team 怎么用，以及介绍页里出现 `$collaborative-work:team` 与我实际选择它有什么区别。如果以后指定的模型不可用，会怎样处理？我现在只问用法，没有要编排的工作。",
+      "files": [],
+      "expected_output": "grading.json#/cases/5/expected_output",
+      "expectations": ["grading.json#/cases/5/assertions"]
+    },
+    {
+      "id": 6,
+      "prompt": "请用 $collaborative-work:team 团队编排完成一次只读审查：检查 release-notes.md 是否能让使用者理解迁移事项。主控负责判断与沟通，调研代理必须使用 model ID `unavailable-eval-model-7f3`、reasoning effort `xhigh`。如果不能使用该模型，就把限制告诉我，不要自动替代，也不要由主控接管这项审查。",
+      "files": ["fixtures/case-06/release-notes.md"],
+      "expected_output": "grading.json#/cases/6/expected_output",
+      "expectations": ["grading.json#/cases/6/assertions"]
+    },
+    {
+      "id": 7,
+      "prompt": "请先用 $collaborative-work:maintain 对 skill-sample.md 做只读维护评估，再用 $collaborative-work:matt 核对 product-spec.md 是否具备交给真实 Matt 执行链的条件。只报告发现和缺口；不创建或修改规格、技能、票据、安装、配置，也不触发执行链。",
+      "files": ["fixtures/case-07/skill-sample.md", "fixtures/case-07/product-spec.md"],
+      "expected_output": "grading.json#/cases/7/expected_output",
+      "expectations": ["grading.json#/cases/7/assertions"]
+    },
+    {
+      "id": 8,
+      "prompt": "请用 $collaborative-work:story 从你能准确解释的领域选一个研究生层次的概念，用一则约 600 字的寓言讲清楚，接近故事结尾再揭题。故事之后解释概念、主要隐喻对应和类比的局限。领域由你选。",
+      "files": [],
+      "expected_output": "grading.json#/cases/8/expected_output",
+      "expectations": ["grading.json#/cases/8/assertions"]
+    }
+  ]
+}

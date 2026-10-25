@@ -1,0 +1,4 @@
+interface:
+  display_name: "collaborative-work:brainstorm · 设计讨论"
+  short_description: "需要一起澄清目标、比较路线和重要取舍时使用，用户可直接选择本入口开始讨论。"
+  default_prompt: "请用 $collaborative-work:brainstorm 处理我提供的任务，沿用已有目标、约束和授权。"

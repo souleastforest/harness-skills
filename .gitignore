@@ -1,1 +1,6 @@
 /.dsh-invoker-profile/
+/dist/
+/tools/collaborative_work/.venv/
+/tools/collaborative_work/*.egg-info/
+/tools/collaborative_work/**/__pycache__/
+/.build/

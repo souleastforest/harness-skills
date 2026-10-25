@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "target_host": "Codex desktop",
+  "tested_cli_versions": [
+    "0.164.0-alpha.11.1"
+  ],
+  "tested_platforms": [
+    "macOS 14.4.1 arm64"
+  ],
+  "verification_contract": {
+    "static": "metadata, containment, complete file manifests, deterministic archive",
+    "native": "unique names, plugin identity, enabled status, cache origin and bytes",
+    "behavior": "version-bound isolated task cases",
+    "ui": "requires direct observation; backend discovery alone does not prove UI completion"
+  },
+  "not_established": [
+    "minimum CLI version",
+    "other hosts",
+    "other model families",
+    "desktop autocomplete interaction"
+  ],
+  "runtime_components": {
+    "skills": 9,
+    "mcp_servers": 0,
+    "hooks": 0,
+    "executable_scripts": 0
+  }
+}

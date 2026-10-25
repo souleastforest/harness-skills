@@ -1,0 +1,4 @@
+interface:
+  display_name: "collaborative-work:complexity · 复杂度判断"
+  short_description: "评估一个任务的未知程度、依赖与影响，推荐适合的流程和交付物；用于仅诊断复杂度的请求。"
+  default_prompt: "请用 $collaborative-work:complexity 处理我提供的任务，沿用已有目标、约束和授权。"

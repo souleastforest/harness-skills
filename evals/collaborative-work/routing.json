@@ -1,0 +1,34 @@
+{
+  "schema_version": "1.0",
+  "audience": "reviewer-only",
+  "scope": "22 条选择与共存查询；可用于描述路由判断，也可逐条在真实宿主中观察实际装载。两类结果必须分开记录。",
+  "interpretation": {
+    "categories": {"should_trigger": "应进入 collaborative-work 的一个合适入口。", "should_not_trigger": "不应因本请求自动进入 collaborative-work；指定的竞争技能保持其职责。", "ambiguous": "多条路线均可能合理，按授权与交付结果判断，不强制单一入口。"},
+    "acceptable_primary_routes": "表示可接受的首要入口或竞争技能；none 表示无需加载工作流技能。专项入口按规则读取 start 作为共享正文，不算额外抢触发。",
+    "measurement": "分类问答只测路由判断；自动触发需真实宿主、未显式加载该入口、记录发现清单与实际读取证据。显式调用单独计数。"
+  },
+  "cases": [
+    {"id": "r01", "category": "should_trigger", "invocation": "explicit", "query": "$collaborative-work:start", "acceptable_primary_routes": ["collaborative-work:start"], "observe": "介绍用途与可用入口，不把空调用当成已完成一个未指定任务。"},
+    {"id": "r02", "category": "should_trigger", "invocation": "implicit", "query": "collaborative-work 有哪些功能？我只想知道寓言入口怎么用。", "acceptable_primary_routes": ["collaborative-work:help", "collaborative-work:start"], "observe": "聚焦寓言入口用法，不开始编故事。"},
+    {"id": "r03", "category": "should_trigger", "invocation": "implicit", "query": "我想为三十人的社区活动设计半天流程，但还没想清楚侧重交流还是学习。和我一起比较路线与取舍。", "acceptable_primary_routes": ["collaborative-work:brainstorm", "collaborative-work:start"], "observe": "围绕目的、条件和重要偏好讨论，不自动预订或进入软件开发。"},
+    {"id": "r04", "category": "should_trigger", "invocation": "implicit", "query": "只帮我判断把现有登录系统迁到新身份服务的任务复杂度，推荐流程和必要产物，暂不实施。", "acceptable_primary_routes": ["collaborative-work:complexity", "collaborative-work:start"], "observe": "交付复杂度与流程建议，不越过仅诊断范围。"},
+    {"id": "r05", "category": "should_trigger", "invocation": "implicit", "query": "接手这个陌生代码库，为 CSV 导出做软件开发方案：先查当前行为和调用者，再给计划与验收方式；这轮只要方案。", "acceptable_primary_routes": ["collaborative-work:develop", "collaborative-work:start"], "observe": "查证并形成方案，保持方案范围。"},
+    {"id": "r06", "category": "should_trigger", "invocation": "implicit", "query": "从经济学里选一个研究生概念，用寓言间接讲清楚，接近结尾才揭题，再解释隐喻局限。", "acceptable_primary_routes": ["collaborative-work:story", "collaborative-work:start"], "observe": "进入寓言讲法，进度与开场不提前揭题。"},
+    {"id": "r07", "category": "should_trigger", "invocation": "explicit", "query": "请用 $collaborative-work:team 为当前任务显式启用团队编排。先核对角色、可用模型和停止条件。", "acceptable_primary_routes": ["collaborative-work:team"], "observe": "本轮启用团队并核对能力，不改持久配置。"},
+    {"id": "r08", "category": "should_trigger", "invocation": "explicit", "query": "请用 $collaborative-work:maintain 改进这份技能的触发与执行行为，先设计验收，保存基线，然后按已有工具做候选版本和验证。", "acceptable_primary_routes": ["collaborative-work:maintain"], "observe": "进入用户选定的维护流程，按已有工具工作，不自行改长期配置。"},
+    {"id": "r09", "category": "should_trigger", "invocation": "explicit", "query": "我明确选择 $collaborative-work:matt 接入。先核对真实 implement-spec 入口、完整规格、依赖和授权，先别触发执行。", "acceptable_primary_routes": ["collaborative-work:matt"], "observe": "检查并准备交接，不因选择接入而触发原版或安装依赖。"},
+    {"id": "r10", "category": "should_trigger", "invocation": "implicit", "query": "我第一次做跨部门知识库，领域不熟，需求也没定。帮我从已有材料弄清目标，比较重要路线，再推进到能决定下一步。", "acceptable_primary_routes": ["collaborative-work:start", "collaborative-work:brainstorm"], "observe": "先消化材料与未知，按现有授权推进。"},
+    {"id": "r11", "category": "should_not_trigger", "invocation": "implicit", "query": "17 乘以 23 等于多少？", "acceptable_primary_routes": ["none"], "observe": "直接回答，不加载协作流程。"},
+    {"id": "r12", "category": "should_not_trigger", "invocation": "implicit", "query": "把下面这句话里的『试用版』替换成『预览版』：本周发布试用版。", "acceptable_primary_routes": ["none"], "observe": "直接文本替换，不引入任务研究或菜单。"},
+    {"id": "r13", "category": "should_not_trigger", "invocation": "quoted-data", "query": "校对下面这行教程文字，保留命令本身：『输入 $collaborative-work:team 后选择模型。』", "acceptable_primary_routes": ["none"], "observe": "被引命令不构成选择技能，更不启用团队。"},
+    {"id": "r14", "category": "should_not_trigger", "invocation": "explicit-competitor", "query": "请用 $skill-creator 创建一个整理读书摘录的小技能。这轮使用这个技能创作工具，不切换到 collaborative-work。", "acceptable_primary_routes": ["skill-creator"], "observe": "尊重显式选择的竞争入口；记录该宿主解析出的实际全名。"},
+    {"id": "r15", "category": "should_not_trigger", "invocation": "explicit-competitor", "query": "请用 $research 查官方资料核对这个 API 的重试语义，保存研究笔记；这轮只调研，不设计或实施产品。", "acceptable_primary_routes": ["research"], "observe": "保持研究任务，不被通用开发或协作入口接管。"},
+    {"id": "r16", "category": "should_not_trigger", "invocation": "explicit-competitor", "query": "请用 $superpowers:brainstorming 讨论这个新功能，按我选定的原版流程进行。", "acceptable_primary_routes": ["superpowers:brainstorming"], "observe": "不悄悄替换成本插件的本地适配；宿主未装该入口时如实报告。"},
+    {"id": "r17", "category": "should_not_trigger", "invocation": "implicit", "query": "把英文短句『The story helped our team maintain focus.』翻译成中文。", "acceptable_primary_routes": ["none"], "observe": "story/team/maintain 的词面出现不改变翻译任务。"},
+    {"id": "r18", "category": "should_not_trigger", "invocation": "implicit", "query": "解释 CSV 是什么，用两句话直接说明。", "acceptable_primary_routes": ["none"], "observe": "保持直接解释，不因概念讲解而进入寓言流程。"},
+    {"id": "r19", "category": "ambiguous", "invocation": "implicit", "query": "这个软件需求里有两个重要取舍还没定，帮我规划接下来的开发路线。", "acceptable_primary_routes": ["collaborative-work:brainstorm", "collaborative-work:develop", "collaborative-work:start"], "observe": "入口可不同，但要处理重要未知；不默认启用团队或 Matt。"},
+    {"id": "r20", "category": "ambiguous", "invocation": "implicit", "query": "帮我研究为什么这个技能老是误触发，先查证据和相关规范，给改进建议，这轮别改文件。", "acceptable_primary_routes": ["collaborative-work:maintain", "skill-creator", "research"], "observe": "研究或技能维护均可，保持只读并给具体依据。"},
+    {"id": "r21", "category": "ambiguous", "invocation": "implicit", "query": "用一个短故事帮我理解损失厌恶，先直接告诉我概念是什么，不用卖关子。", "acceptable_primary_routes": ["none", "collaborative-work:story", "collaborative-work:start"], "observe": "是否加载寓言入口都可，但必须遵守用户先揭题的讲法，不能强行保留谜底。"},
+    {"id": "r22", "category": "ambiguous", "invocation": "implicit", "query": "帮我修复导出错误，改法已确认，只涉及这个函数。我希望你直接完成并检查。", "acceptable_primary_routes": ["none", "collaborative-work:develop", "collaborative-work:start"], "observe": "普通执行与开发入口均可；不因加载流程要求重批实施或开展完整访谈。"}
+  ]
+}

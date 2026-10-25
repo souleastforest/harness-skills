@@ -1,0 +1,4 @@
+interface:
+  display_name: "collaborative-work:story · 寓言学习"
+  short_description: "用户要通过寓言间接理解一个概念时使用，结尾揭题，再说明概念、隐喻与类比局限。"
+  default_prompt: "请用 $collaborative-work:story 用寓言解释一个概念，接近结尾再揭题，随后解释隐喻。"

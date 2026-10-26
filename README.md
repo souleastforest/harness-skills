@@ -33,7 +33,7 @@
 
 [ZIP 插件包](dist/collaborative-work-plugin-v0.5.0.zip)、[完整清单](dist/collaborative-work-plugin-v0.5.0.manifest.json)与[校验文件](dist/collaborative-work-plugin-v0.5.0.sha256)。插件注册 `collaborative-work:start` 及八项独立功能；安装方法见[插件说明](plugins/collaborative-work/README.md)。
 
-本轮增加可复现构建、严格发现检查、评估用例与 MIT 许可，并完成本机升级/回退演练。[验证记录](docs/collaborative-work/0.5.0-validation.md)分别说明已检查内容和证据限制；尚未验证桌面补全交互、其他宿主或远端 CI。发布工具和评估材料保存在源码中，不随运行插件分发。
+本轮增加可复现构建、严格发现检查、评估用例与 MIT 许可，完成本机升级/回退演练，并通过 GitHub 的 Linux / Python 3.13 CI。[验证记录](docs/collaborative-work/0.5.0-validation.md)分别说明已检查内容和证据限制；桌面补全交互与其他宿主的实际运行仍未验证。发布工具和评估材料保存在源码中，不随运行插件分发。
 
 ## 下载 collaborative-work 0.3.0
 
